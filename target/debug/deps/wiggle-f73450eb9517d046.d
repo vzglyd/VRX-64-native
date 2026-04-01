@@ -1,0 +1,10 @@
+/home/rodgerbenham/.openclaw/workspace/vzglyd-native/target/debug/deps/wiggle-f73450eb9517d046.d: /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/lib.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/borrow.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/error.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/guest_type.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/region.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/wasmtime.rs
+
+/home/rodgerbenham/.openclaw/workspace/vzglyd-native/target/debug/deps/libwiggle-f73450eb9517d046.rmeta: /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/lib.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/borrow.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/error.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/guest_type.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/region.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/wasmtime.rs
+
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/lib.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/borrow.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/error.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/guest_type.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/region.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wiggle-16.0.0/src/wasmtime.rs:

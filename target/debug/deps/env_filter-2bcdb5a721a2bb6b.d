@@ -1,0 +1,10 @@
+/home/rodgerbenham/.openclaw/workspace/vzglyd-native/target/debug/deps/env_filter-2bcdb5a721a2bb6b.d: /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/lib.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/directive.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/filter.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/filtered_log.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/op.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/parser.rs
+
+/home/rodgerbenham/.openclaw/workspace/vzglyd-native/target/debug/deps/libenv_filter-2bcdb5a721a2bb6b.rmeta: /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/lib.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/directive.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/filter.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/filtered_log.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/op.rs /home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/parser.rs
+
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/lib.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/directive.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/filter.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/filtered_log.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/op.rs:
+/home/rodgerbenham/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/env_filter-1.0.1/src/parser.rs:

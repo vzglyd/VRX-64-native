@@ -1,1 +1,0 @@
-{"rustc":18276270781310494267,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[8166241603814352335,"build_script_build",false,15579567918470849991]],"local":[{"RerunIfChanged":{"output":"debug/build/wasi-common-cf757a20b6821ccf/output","paths":["build.rs"]}}],"rustflags":[],"config":0,"compile_kind":0}

@@ -251,7 +251,7 @@ mod tests {
         AssetRef, DisplayConfig, ManifestAssets, ManifestRequirements, ManifestShaders,
         ManifestSidecar, ManifestValidationError, SceneAssetRef, SlideManifest,
     };
-    use crate::transition::TransitionKind;
+    use vzglyd_kernel::transition::TransitionKind;
 
     #[test]
     fn minimal_manifest_parses_without_new_sections() {

@@ -11,6 +11,7 @@ use vzglyd_native::slide_loader;
 
 const DEFAULT_SLIDES_DIR: &str = "slides";
 
+#[derive(Debug)]
 enum Command {
     Run(RunConfig),
     Pack {

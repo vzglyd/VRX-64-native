@@ -4,15 +4,18 @@
 
 use bytemuck::Pod;
 use glam::{Mat4, Vec3};
+use std::path::Path;
 use std::sync::Arc;
 use vzglyd_slide::{
-    DrawSource, DrawSpec, FilterMode, PipelineKind, ScreenVertex, ShaderSources, SlideSpec,
-    StaticMesh, TextureDesc, WorldLighting, WorldVertex,
+    DrawSource, DrawSpec, FilterMode, PipelineKind, RuntimeMeshSet, RuntimeOverlay, SceneSpace,
+    ScreenVertex, ShaderSources, SlideSpec, StaticMesh, TextureDesc, WorldLighting, WorldVertex,
 };
 
 use crate::gpu::context::{GpuContext, HEIGHT, OffscreenTarget, WIDTH};
 use crate::render::shader_contract::{ShaderContract, assemble_slide_shader_source};
 use crate::slide::{DecodedSlideSpec, decode_slide_spec};
+use crate::slide_loader::{self, LoadError};
+use crate::slide_manifest::SlideManifest;
 use crate::utils::clock::melbourne_clock_seconds;
 
 /// Uniforms for screen-space slides.
@@ -90,6 +93,44 @@ impl SlidePipelines {
             PipelineKind::Transparent => self.transparent.as_ref().map(|p| p.as_ref()),
         }
     }
+
+    pub fn first(&self) -> Option<&wgpu::RenderPipeline> {
+        self.opaque
+            .as_ref()
+            .or(self.transparent.as_ref())
+            .map(|pipeline| pipeline.as_ref())
+    }
+}
+
+pub struct LoadedScreenSlide {
+    pub spec: SlideSpec<ScreenVertex>,
+    pub runtime: Option<slide_loader::SlideRuntime>,
+    pub background_scene: Option<slide_loader::ScreenBackgroundScene>,
+}
+
+pub struct LoadedWorldSlide {
+    pub spec: SlideSpec<WorldVertex>,
+    pub runtime: Option<slide_loader::SlideRuntime>,
+    pub shader_source_hint: Option<slide_loader::ShaderSourceHint>,
+}
+
+pub enum LoadedSlide {
+    Screen(LoadedScreenSlide),
+    World(LoadedWorldSlide),
+}
+
+impl LoadedSlide {
+    pub fn validate(&self) -> Result<(), vzglyd_slide::SpecError> {
+        match self {
+            LoadedSlide::Screen(screen) => screen.spec.validate(),
+            LoadedSlide::World(world) => world.spec.validate(),
+        }
+    }
+}
+
+struct OverlayRuntime {
+    buffers: DynamicMeshBuffers,
+    limits: vzglyd_slide::Limits,
 }
 
 /// Screen slide renderer.
@@ -101,6 +142,9 @@ pub struct ScreenSlideRenderer {
     pub font_texture: Option<SlideTexture>,
     pub static_meshes: Vec<MeshBuffers>,
     pub elapsed: f32,
+    runtime: Option<slide_loader::SlideRuntime>,
+    overlay: Option<OverlayRuntime>,
+    background_scene: Option<Box<WorldSlideRenderer>>,
 }
 
 /// World slide renderer.
@@ -113,6 +157,7 @@ pub struct WorldSlideRenderer {
     pub dynamic_meshes: Vec<DynamicMeshBuffers>,
     pub lighting: WorldLighting,
     pub elapsed: f32,
+    runtime: Option<slide_loader::SlideRuntime>,
 }
 
 /// Slide renderer enum.
@@ -124,6 +169,22 @@ pub enum SlideRenderer {
 impl ScreenSlideRenderer {
     /// Creates a new screen slide renderer.
     pub fn new(ctx: &GpuContext, spec: SlideSpec<ScreenVertex>) -> Result<Self, String> {
+        Self::from_loaded(
+            ctx,
+            LoadedScreenSlide {
+                spec,
+                runtime: None,
+                background_scene: None,
+            },
+        )
+    }
+
+    fn from_loaded(ctx: &GpuContext, loaded: LoadedScreenSlide) -> Result<Self, String> {
+        let LoadedScreenSlide {
+            spec,
+            runtime,
+            background_scene,
+        } = loaded;
         let mut textures = load_slide_textures(&ctx.device, &ctx.queue, &spec.textures)?;
         if textures.is_empty() {
             textures.push(create_solid_texture(
@@ -191,6 +252,7 @@ impl ScreenSlideRenderer {
             ShaderContract::Screen2D,
             spec.shaders.as_ref(),
             include_str!("../../shaders/default_screen.wgsl"),
+            None,
         );
 
         let pipelines = create_screen_slide_pipelines(
@@ -200,6 +262,50 @@ impl ScreenSlideRenderer {
             &shader_source,
             "screen_slide",
         )?;
+
+        let overlay = if spec.overlay.is_none()
+            && !runtime
+                .as_ref()
+                .is_some_and(slide_loader::SlideRuntime::has_overlay)
+        {
+            None
+        } else {
+            Some(OverlayRuntime {
+                buffers: DynamicMeshBuffers {
+                    vertex_buffer: Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("overlay_vertex_buffer"),
+                        size: (spec.limits.max_vertices as usize
+                            * std::mem::size_of::<ScreenVertex>()) as u64,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    })),
+                    index_buffer: Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("overlay_index_buffer"),
+                        size: (spec.limits.max_indices as usize * std::mem::size_of::<u16>()) as u64,
+                        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    })),
+                    vertex_capacity: spec.limits.max_vertices,
+                    index_capacity: spec.limits.max_indices,
+                    current_index_count: 0,
+                },
+                limits: spec.limits,
+            })
+        };
+
+        let background_scene = background_scene
+            .map(|scene| {
+                WorldSlideRenderer::from_loaded(
+                    ctx,
+                    LoadedWorldSlide {
+                        spec: scene.spec,
+                        runtime: None,
+                        shader_source_hint: scene.shader_source_hint,
+                    },
+                )
+            })
+            .transpose()?
+            .map(Box::new);
 
         Ok(Self {
             spec,
@@ -212,17 +318,64 @@ impl ScreenSlideRenderer {
             font_texture,
             static_meshes,
             elapsed: 0.0,
+            runtime,
+            overlay,
+            background_scene,
         })
     }
 
+    pub fn set_active(&mut self, active: bool) {
+        if let Some(runtime) = &mut self.runtime {
+            runtime.set_active(active);
+        }
+    }
+
     /// Updates the slide and returns whether it changed.
-    pub fn update(&mut self, dt: f32) -> bool {
+    pub fn update(&mut self, ctx: &GpuContext, dt: f32) -> bool {
         self.elapsed += dt;
+        if let Some(background_scene) = self.background_scene.as_mut() {
+            background_scene.set_elapsed(self.elapsed);
+        }
+        if let Some(runtime) = &mut self.runtime {
+            match runtime.update(dt) {
+                Ok(code) if code == slide_loader::SLIDE_UPDATE_NO_CHANGE => {}
+                Ok(code) if code == slide_loader::SLIDE_UPDATE_MESHES_UPDATED => {
+                    if let (Some(runtime), Some(overlay)) = (&mut self.runtime, &mut self.overlay) {
+                        match runtime.read_overlay::<ScreenVertex>() {
+                            Ok(Some(updated_overlay)) if overlay.validate(&updated_overlay) => {
+                                overlay.apply(ctx, &updated_overlay);
+                            }
+                            Ok(Some(_)) => {
+                                log::warn!(
+                                    "screen slide overlay update exceeded declared runtime limits"
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                log::error!("screen slide overlay read failed: {error}");
+                            }
+                        }
+                    }
+                }
+                Ok(other) => {
+                    log::warn!(
+                        "screen slide returned unsupported vzglyd_update code {other}; expected 0 or 1"
+                    );
+                }
+                Err(error) => {
+                    log::error!("screen slide update failed: {error}");
+                }
+            }
+        }
         true
     }
 
     /// Renders the slide to an offscreen target.
     pub fn render(&self, ctx: &GpuContext, target: &OffscreenTarget) {
+        if let Some(background_scene) = &self.background_scene {
+            background_scene.render(ctx, target);
+        }
+
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -236,7 +389,11 @@ impl ScreenSlideRenderer {
                     view: &target.color_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: if self.background_scene.is_some() {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -285,6 +442,20 @@ impl ScreenSlideRenderer {
                     }
                 }
             }
+
+            if let Some(overlay) = &self.overlay {
+                if overlay.buffers.current_index_count > 0 {
+                    if let Some(pipeline) = self.pipelines.first() {
+                        pass.set_pipeline(pipeline);
+                        pass.set_vertex_buffer(0, overlay.buffers.vertex_buffer.slice(..));
+                        pass.set_index_buffer(
+                            overlay.buffers.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint16,
+                        );
+                        pass.draw_indexed(0..overlay.buffers.current_index_count, 0, 0..1);
+                    }
+                }
+            }
         }
 
         ctx.queue.submit(Some(encoder.finish()));
@@ -294,6 +465,22 @@ impl ScreenSlideRenderer {
 impl WorldSlideRenderer {
     /// Creates a new world slide renderer.
     pub fn new(ctx: &GpuContext, spec: SlideSpec<WorldVertex>) -> Result<Self, String> {
+        Self::from_loaded(
+            ctx,
+            LoadedWorldSlide {
+                spec,
+                runtime: None,
+                shader_source_hint: None,
+            },
+        )
+    }
+
+    fn from_loaded(ctx: &GpuContext, loaded: LoadedWorldSlide) -> Result<Self, String> {
+        let LoadedWorldSlide {
+            spec,
+            runtime,
+            shader_source_hint,
+        } = loaded;
         let mut textures = load_slide_textures(&ctx.device, &ctx.queue, &spec.textures)?;
         if textures.is_empty() {
             textures.push(create_solid_texture(
@@ -365,6 +552,7 @@ impl WorldSlideRenderer {
             ShaderContract::World3D,
             spec.shaders.as_ref(),
             include_str!("../../shaders/default_world.wgsl"),
+            shader_source_hint,
         );
 
         let pipelines = create_slide_pipelines(
@@ -375,7 +563,7 @@ impl WorldSlideRenderer {
             "world_slide",
         )?;
 
-        Ok(Self {
+        let mut renderer = Self {
             spec,
             pipelines,
             bind_group: WorldBindGroup {
@@ -387,12 +575,63 @@ impl WorldSlideRenderer {
             dynamic_meshes,
             lighting,
             elapsed: 0.0,
-        })
+            runtime,
+        };
+
+        if let Some(runtime) = &mut renderer.runtime {
+            if runtime.has_dynamic_meshes() {
+                match runtime.read_dynamic_meshes::<WorldVertex>() {
+                    Ok(Some(meshes)) => {
+                        apply_runtime_world_meshes(ctx, &mut renderer.dynamic_meshes, &meshes);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        log::error!("world slide initial dynamic mesh read failed: {error}");
+                    }
+                }
+            }
+        }
+
+        Ok(renderer)
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        if let Some(runtime) = &mut self.runtime {
+            runtime.set_active(active);
+        }
+    }
+
+    pub fn set_elapsed(&mut self, elapsed: f32) {
+        self.elapsed = elapsed;
     }
 
     /// Updates the slide and returns whether it changed.
-    pub fn update(&mut self, dt: f32) -> bool {
+    pub fn update(&mut self, ctx: &GpuContext, dt: f32) -> bool {
         self.elapsed += dt;
+        if let Some(runtime) = &mut self.runtime {
+            match runtime.update(dt) {
+                Ok(code) if code == slide_loader::SLIDE_UPDATE_NO_CHANGE => {}
+                Ok(code) if code == slide_loader::SLIDE_UPDATE_MESHES_UPDATED => {
+                    match runtime.read_dynamic_meshes::<WorldVertex>() {
+                        Ok(Some(meshes)) => {
+                            apply_runtime_world_meshes(ctx, &mut self.dynamic_meshes, &meshes);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            log::error!("world slide dynamic mesh read failed: {error}");
+                        }
+                    }
+                }
+                Ok(other) => {
+                    log::warn!(
+                        "world slide returned unsupported vzglyd_update code {other}; expected 0 or 1"
+                    );
+                }
+                Err(error) => {
+                    log::error!("world slide update failed: {error}");
+                }
+            }
+        }
         true
     }
 
@@ -439,18 +678,49 @@ impl WorldSlideRenderer {
 
             // Draw static meshes
             for draw in &self.spec.draws {
-                if let DrawSource::Static(mesh_idx) = draw.source {
-                    if let Some(mesh) = self.static_meshes.get(mesh_idx) {
-                        if let Some(pipeline) = self.pipelines.get(draw.pipeline) {
-                            let draw_range_end = draw.index_range.end.min(mesh.index_count);
-                            if draw.index_range.start < draw_range_end {
-                                pass.set_pipeline(pipeline);
-                                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                                pass.set_index_buffer(
-                                    mesh.index_buffer.slice(..),
-                                    wgpu::IndexFormat::Uint16,
-                                );
-                                pass.draw_indexed(draw.index_range.start..draw_range_end, 0, 0..1);
+                if let Some(pipeline) = self.pipelines.get(draw.pipeline) {
+                    pass.set_pipeline(pipeline);
+                    match draw.source {
+                        DrawSource::Static(mesh_idx) => {
+                            if let Some(mesh) = self.static_meshes.get(mesh_idx) {
+                                let draw_range_end = draw.index_range.end.min(mesh.index_count);
+                                if draw.index_range.start < draw_range_end {
+                                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                                    pass.set_index_buffer(
+                                        mesh.index_buffer.slice(..),
+                                        wgpu::IndexFormat::Uint16,
+                                    );
+                                    pass.draw_indexed(
+                                        draw.index_range.start..draw_range_end,
+                                        0,
+                                        0..1,
+                                    );
+                                }
+                            }
+                        }
+                        DrawSource::Dynamic(mesh_idx) => {
+                            if let Some(mesh) = self.dynamic_meshes.get(mesh_idx) {
+                                let available = mesh
+                                    .current_index_count
+                                    .saturating_sub(draw.index_range.start);
+                                let requested = draw
+                                    .index_range
+                                    .end
+                                    .saturating_sub(draw.index_range.start);
+                                let count = available.min(requested);
+                                if count > 0 {
+                                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                                    pass.set_index_buffer(
+                                        mesh.index_buffer.slice(..),
+                                        wgpu::IndexFormat::Uint16,
+                                    );
+                                    pass.draw_indexed(
+                                        draw.index_range.start
+                                            ..draw.index_range.start.saturating_add(count),
+                                        0,
+                                        0..1,
+                                    );
+                                }
                             }
                         }
                     }
@@ -486,6 +756,47 @@ impl WorldSlideRenderer {
             main_light_dir: pack_main_light_dir(&self.lighting),
             main_light_color: pack_main_light_color(&self.lighting),
         }
+    }
+}
+
+impl OverlayRuntime {
+    fn validate(&self, overlay: &RuntimeOverlay<ScreenVertex>) -> bool {
+        overlay.vertices.len() <= self.limits.max_vertices as usize
+            && overlay.indices.len() <= self.limits.max_indices as usize
+    }
+
+    fn apply(&mut self, ctx: &GpuContext, overlay: &RuntimeOverlay<ScreenVertex>) {
+        if overlay.vertices.is_empty() || overlay.indices.is_empty() {
+            self.buffers.current_index_count = 0;
+            return;
+        }
+
+        let used_vertices = overlay.vertices.len().min(self.buffers.vertex_capacity as usize);
+        let used_indices = overlay.indices.len().min(self.buffers.index_capacity as usize);
+        ctx.queue.write_buffer(
+            &self.buffers.vertex_buffer,
+            0,
+            bytemuck::cast_slice(&overlay.vertices[..used_vertices]),
+        );
+        ctx.queue.write_buffer(
+            &self.buffers.index_buffer,
+            0,
+            bytemuck::cast_slice(&overlay.indices[..used_indices]),
+        );
+        self.buffers.current_index_count = used_indices as u32;
+    }
+}
+
+impl SlideRenderer {
+    pub fn set_active(&mut self, active: bool) {
+        match self {
+            SlideRenderer::Screen(screen) => screen.set_active(active),
+            SlideRenderer::World(world) => world.set_active(active),
+        }
+    }
+
+    pub fn park(&mut self) {
+        self.set_active(false);
     }
 }
 
@@ -691,8 +1002,11 @@ fn create_dynamic_mesh_buffers(
         label: Some("dynamic_index_buffer"),
         size: index_capacity as u64 * 2,
         usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
+        mapped_at_creation: true,
     });
+    index_buffer.slice(..).get_mapped_range_mut()[..mesh.indices.len() * 2]
+        .copy_from_slice(bytemuck::cast_slice(&mesh.indices));
+    index_buffer.unmap();
 
     DynamicMeshBuffers {
         vertex_buffer: Arc::new(vertex_buffer),
@@ -860,6 +1174,7 @@ fn resolve_slide_shader_source(
     contract: ShaderContract,
     shaders: Option<&ShaderSources>,
     default_shader_body: &str,
+    shader_source_hint: Option<slide_loader::ShaderSourceHint>,
 ) -> String {
     let shader_body = shaders
         .and_then(|sources| {
@@ -868,7 +1183,13 @@ fn resolve_slide_shader_source(
                 .as_deref()
                 .or(sources.vertex_wgsl.as_deref())
         })
-        .unwrap_or(default_shader_body);
+        .unwrap_or_else(|| match (contract, shader_source_hint) {
+            (
+                ShaderContract::World3D,
+                Some(slide_loader::ShaderSourceHint::DefaultWorldScene),
+            ) => include_str!("../imported_scene_shader.wgsl"),
+            _ => default_shader_body,
+        });
     assemble_slide_shader_source(contract, shader_body)
 }
 
@@ -1210,6 +1531,104 @@ fn create_screen_slide_pipelines(
     })
 }
 
+fn apply_runtime_world_meshes(
+    ctx: &GpuContext,
+    buffers: &mut [DynamicMeshBuffers],
+    meshes: &RuntimeMeshSet<WorldVertex>,
+) {
+    for mesh in &meshes.meshes {
+        let Some(buffer) = buffers.get_mut(mesh.mesh_index as usize) else {
+            log::warn!(
+                "world slide runtime updated unknown dynamic mesh index {}",
+                mesh.mesh_index
+            );
+            continue;
+        };
+        let used_vertices = mesh.vertices.len().min(buffer.vertex_capacity as usize);
+        ctx.queue.write_buffer(
+            &buffer.vertex_buffer,
+            0,
+            bytemuck::cast_slice(&mesh.vertices[..used_vertices]),
+        );
+        buffer.current_index_count = mesh.index_count.min(buffer.index_capacity);
+    }
+}
+
+pub fn create_loaded_slide_renderer(
+    ctx: &GpuContext,
+    slide: LoadedSlide,
+) -> Result<SlideRenderer, String> {
+    match slide {
+        LoadedSlide::World(world) => {
+            Ok(SlideRenderer::World(WorldSlideRenderer::from_loaded(ctx, world)?))
+        }
+        LoadedSlide::Screen(screen) => Ok(SlideRenderer::Screen(ScreenSlideRenderer::from_loaded(
+            ctx, screen,
+        )?)),
+    }
+}
+
+pub fn load_wasm_slide_from_bytes(
+    bytes: &[u8],
+) -> Result<(LoadedSlide, Option<SlideManifest>), LoadError> {
+    let extracted = slide_loader::extract_embedded_bytes_to_cache(bytes)?;
+    load_wasm_slide(&extracted.to_string_lossy(), None)
+}
+
+pub fn load_wasm_slide(
+    path: &str,
+    params_bytes: Option<&[u8]>,
+) -> Result<(LoadedSlide, Option<SlideManifest>), LoadError> {
+    if let Ok((slide, manifest)) = load_screen_wasm_slide(path, params_bytes) {
+        if let LoadedSlide::Screen(screen) = &slide {
+            if screen.spec.scene_space == SceneSpace::Screen2D && screen.spec.validate().is_ok() {
+                return Ok((slide, Some(manifest)));
+            }
+        }
+    }
+
+    let (loaded, manifest) = load_spec_with_manifest::<WorldVertex>(path, params_bytes)?;
+    Ok((
+        LoadedSlide::World(LoadedWorldSlide {
+            spec: loaded.spec,
+            runtime: loaded.runtime,
+            shader_source_hint: loaded.shader_source_hint,
+        }),
+        Some(manifest),
+    ))
+}
+
+fn load_screen_wasm_slide(
+    path: &str,
+    params_bytes: Option<&[u8]>,
+) -> Result<(LoadedSlide, SlideManifest), LoadError> {
+    let (loaded, manifest) = load_spec_with_manifest::<ScreenVertex>(path, params_bytes)?;
+    Ok((
+        LoadedSlide::Screen(LoadedScreenSlide {
+            spec: loaded.spec,
+            runtime: loaded.runtime,
+            background_scene: loaded.screen_background_scene,
+        }),
+        manifest,
+    ))
+}
+
+fn load_spec_with_manifest<V>(
+    path: &str,
+    params_bytes: Option<&[u8]>,
+) -> Result<(slide_loader::LoadedSpec<V>, SlideManifest), LoadError>
+where
+    V: slide_loader::PackageMeshVertex,
+{
+    if Path::new(path).extension().and_then(|ext| ext.to_str())
+        == Some(slide_loader::PACKAGE_ARCHIVE_EXTENSION)
+    {
+        slide_loader::load_slide_from_archive(path, params_bytes)
+    } else {
+        slide_loader::load_slide_from_wasm(path, params_bytes)
+    }
+}
+
 /// Creates a slide renderer based on the scene space.
 pub fn create_slide_renderer(ctx: &GpuContext, spec_bytes: &[u8]) -> Result<SlideRenderer, String> {
     match decode_slide_spec(spec_bytes)? {
@@ -1251,6 +1670,7 @@ mod tests {
             ShaderContract::World3D,
             spec.shaders.as_ref(),
             include_str!("../../shaders/default_world.wgsl"),
+            None,
         );
 
         naga::front::wgsl::parse_str(&shader_source).expect("assembled clock shader parses");

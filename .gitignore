@@ -1,6 +1,6 @@
 # Rust
-/target/
-/loading-slide/target/
+/target/**
+loading-slide/target/
 **/*.rs.bk
 Cargo.lock
 

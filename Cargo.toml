@@ -64,3 +64,6 @@ drm = "0.15"
 
 [build-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+wat = "1"

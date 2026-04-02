@@ -12,6 +12,8 @@ pub mod assets;
 pub mod gpu;
 pub mod render;
 pub mod slide;
+pub mod slide_loader;
+pub mod slide_manifest;
 pub mod utils;
 pub mod wasm;
 

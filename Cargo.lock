@@ -3291,6 +3291,7 @@ dependencies = [
  "vzglyd-slide",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
  "wgpu",
  "winit",
  "zip",

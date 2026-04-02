@@ -19,12 +19,32 @@ cargo build --release
 ## Running
 
 ```bash
-# Run with a specific slide
-cargo run -- --scene slides/flat
+# Run without slides (shows colored background)
+cargo run
 
 # Run with a slides directory
 cargo run -- --slides-dir slides/
+
+# Run with verbose output
+cargo run -- --slides-dir slides/ -v
 ```
+
+## Slides Folder
+
+The `slides/` folder contains WebAssembly slide files that are loaded at runtime.
+Each slide should be a `.wasm` file compiled for the VZGLYD ABI.
+
+### Folder Structure
+
+```
+slides/
+├── courtyard/
+│   └── slide.wasm      # Courtyard visualization slide
+└── beach_dog/
+    └── slide.wasm      # Beach dog visualization slide
+```
+
+Slides are discovered recursively in subdirectories.
 
 ## Architecture
 

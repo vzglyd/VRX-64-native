@@ -2,14 +2,15 @@
 //!
 //! Integrates the kernel with winit event loop and wgpu rendering.
 
-use std::io::{Cursor, Read};
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 use vzglyd_kernel::TransitionKind as KernelTransitionKind;
-use vzglyd_kernel::schedule::{build_schedule_from_playlist, parse_playlist};
-use vzglyd_kernel::{Engine, EngineInput, FrameRenderState, Host, LogLevel, RenderCommand};
+use vzglyd_kernel::schedule::parse_playlist;
+use vzglyd_kernel::{
+    Engine, EngineConfig, EngineInput, FrameRenderState, Host, LogLevel, RenderCommand, SlideEntry,
+    SlideManifestMetadata,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
@@ -21,43 +22,53 @@ use winit::platform::x11::{
     ActiveEventLoopExtX11, WindowAttributesExtX11, WindowType as X11WindowType,
 };
 
-use crate::assets::archive::{TempPackage, extract_archive};
 use crate::gpu::context::{GpuContext, HEIGHT, OffscreenTarget, WIDTH};
-use crate::render::{SlideRenderer, TransitionKind, TransitionRenderer, create_slide_renderer};
-use crate::slide::instance::SlideInstance;
-use crate::slide::wire::WIRE_VERSION;
-use crate::wasm::WasmRuntime;
-use vzglyd_slide::{Limits, SceneSpace, ShaderSources, SlideSpec, WorldLighting, WorldVertex};
+use crate::render::{
+    LoadedSlide, SlideRenderer, TransitionKind, TransitionRenderer, create_loaded_slide_renderer,
+    load_wasm_slide, load_wasm_slide_from_bytes,
+};
+use crate::slide_manifest::SlideManifest;
 
 const LOADING_SCENE_PATH: &str = "$loading";
 const LOADING_SLIDE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/loading.vzglyd"));
 #[cfg(target_os = "linux")]
 const X11_BORDERLESS_INSET: u32 = 1;
 
-/// A slide compiled and spec-read on a background thread.
-/// Sent to the main thread for GPU renderer creation.
+#[derive(Clone, Debug)]
+pub struct RunConfig {
+    pub slides_dir: Option<String>,
+    pub scene_path: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ScheduledSlide {
+    path: String,
+    params: Option<serde_json::Value>,
+}
+
 struct PendingSlide {
     idx: usize,
+    package: LoadedSlidePackage,
+}
+
+struct LoadedSlidePackage {
+    slide: LoadedSlide,
+    manifest: Option<SlideManifest>,
     path: String,
-    /// Serialised slide spec bytes, ready for `create_slide_renderer`.
-    spec_bytes: Vec<u8>,
-    /// Keeps the extracted archive temp dir alive until the renderer is stored.
-    _extracted: Option<TempPackage>,
 }
 
 /// Native application state.
 pub struct NativeApp {
     context: Option<GpuContext>,
     engine: Option<Engine>,
-    wasm_runtime: WasmRuntime,
     window: Option<Arc<Window>>,
     last_frame: Option<Instant>,
     running: bool,
 
     // Slide management
-    slides_dir: Option<String>,
-    /// Resolved, ordered list of absolute slide paths (from playlist or discovery).
-    slide_paths: Vec<String>,
+    run_config: RunConfig,
+    /// Resolved, ordered schedule metadata cloned from the kernel after setup.
+    slides: Vec<ScheduledSlide>,
     bootstrap_renderer: Option<LoadedSlideRenderer>,
     bootstrap_target: Option<OffscreenTarget>,
     slide_renderers: Vec<Option<LoadedSlideRenderer>>,
@@ -76,9 +87,7 @@ pub struct NativeApp {
 /// Loaded slide renderer with metadata and the optional extracted archive directory.
 pub struct LoadedSlideRenderer {
     pub renderer: SlideRenderer,
-    pub duration_secs: f32,
-    /// Keeps the extracted temp dir alive for the lifetime of the renderer.
-    _extracted: Option<TempPackage>,
+    pub manifest: Option<SlideManifest>,
 }
 
 /// Temporary host wrapper that avoids borrow issues.
@@ -121,66 +130,17 @@ impl<'a> Host for HostWrapper<'a> {
     }
 }
 
-fn loading_slide_spec() -> SlideSpec<WorldVertex> {
-    SlideSpec {
-        name: "loading_scene".into(),
-        limits: Limits::pi4(),
-        scene_space: SceneSpace::World3D,
-        camera_path: None,
-        shaders: Some(ShaderSources {
-            vertex_wgsl: None,
-            fragment_wgsl: Some(include_str!("loading_shader.wgsl").to_string()),
-        }),
-        overlay: None,
-        font: None,
-        textures_used: 0,
-        textures: vec![],
-        static_meshes: vec![],
-        dynamic_meshes: vec![],
-        draws: vec![],
-        lighting: Some(WorldLighting::new([1.0, 1.0, 1.0], 0.08, None)),
-    }
-}
-
-static LOADING_SPEC_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| {
-    let mut bytes = vec![WIRE_VERSION];
-    bytes.extend(postcard::to_stdvec(&loading_slide_spec()).expect("serialize loading slide spec"));
-    bytes
-});
-
-fn packaged_loading_slide_spec(engine: &wasmtime::Engine) -> Result<Vec<u8>, String> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(LOADING_SLIDE))
-        .map_err(|error| format!("loading slide archive: {error}"))?;
-    let mut wasm_file = archive
-        .by_name("slide.wasm")
-        .map_err(|error| format!("loading slide archive missing slide.wasm: {error}"))?;
-
-    let mut wasm_bytes = Vec::new();
-    wasm_file
-        .read_to_end(&mut wasm_bytes)
-        .map_err(|error| format!("loading slide wasm read failed: {error}"))?;
-
-    let module = wasmtime::Module::from_binary(engine, &wasm_bytes)
-        .map_err(|error| format!("loading slide wasm compile failed: {error}"))?;
-    let mut instance = SlideInstance::new(&module)
-        .map_err(|error| format!("loading slide instantiate failed: {error}"))?;
-    instance
-        .read_spec_bytes()
-        .map_err(|error| format!("loading slide spec read failed: {error}"))
-}
-
 impl NativeApp {
     /// Creates a new native application.
-    pub fn new(slides_dir: Option<String>) -> Result<Self, String> {
+    pub fn new(run_config: RunConfig) -> Result<Self, String> {
         Ok(Self {
             context: None,
-            engine: Some(Engine::new()),
-            wasm_runtime: WasmRuntime::new()?,
+            engine: Some(Engine::with_config(EngineConfig::default())),
             window: None,
             last_frame: None,
             running: false,
-            slides_dir,
-            slide_paths: Vec::new(),
+            run_config,
+            slides: Vec::new(),
             bootstrap_renderer: None,
             bootstrap_target: None,
             slide_renderers: Vec::new(),
@@ -193,46 +153,18 @@ impl NativeApp {
     }
 
     /// Runs the application.
-    pub fn run(slides_dir: Option<String>) -> Result<(), String> {
+    pub fn run(run_config: RunConfig) -> Result<(), String> {
         let event_loop =
             EventLoop::new().map_err(|e| format!("Failed to create event loop: {}", e))?;
         event_loop.set_control_flow(ControlFlow::Poll);
 
-        let mut app = Self::new(slides_dir)?;
+        let mut app = Self::new(run_config)?;
 
-        // Resolve slide paths and build kernel schedule (fast — no WASM compilation here).
+        // Resolve slide paths and build kernel schedule before the event loop starts.
         if let Some(mut engine) = app.engine.take() {
             let mut host = HostWrapper { app: &mut app };
             engine.init(&mut host);
-
-            match &app.slides_dir {
-                None => {
-                    eprintln!("[vzglyd] no --slides-dir provided — nothing to show");
-                    log::warn!("No slides directory provided. Pass --slides-dir <path>.");
-                }
-                Some(dir) => {
-                    eprintln!("[vzglyd] building schedule from: {}", dir);
-                    let dir = dir.clone();
-                    app.slide_paths = load_schedule(&mut engine, &dir);
-                    if app.slide_paths.is_empty() {
-                        eprintln!(
-                            "[vzglyd] WARNING: no slides found in '{}' — check the path and playlist.json",
-                            dir
-                        );
-                        log::warn!(
-                            "No slides found in '{}'. Expected .vzglyd files or playlist.json.",
-                            dir
-                        );
-                    } else {
-                        eprintln!(
-                            "[vzglyd] schedule: {} slide(s) — {:?}",
-                            app.slide_paths.len(),
-                            app.slide_paths
-                        );
-                    }
-                }
-            }
-
+            app.slides = load_schedule(&mut engine, &app.run_config);
             app.engine = Some(engine);
         }
 
@@ -266,8 +198,8 @@ impl NativeApp {
         let title_idx = frame_state
             .next_slide_idx
             .unwrap_or(frame_state.current_slide_idx);
-        if let Some(path) = self.slide_paths.get(title_idx) {
-            self.set_window_title(scene_title(path));
+        if let Some(slide) = self.slides.get(title_idx) {
+            self.set_window_title(scene_title(&slide.path));
         }
     }
 
@@ -289,38 +221,27 @@ impl NativeApp {
     }
 
     fn try_init_bootstrap_renderer(&mut self) {
-        if self.slide_paths.is_empty() || self.context.is_none() {
+        if self.slides.is_empty() || self.context.is_none() {
             return;
         }
 
         let ctx = self.context.as_ref().expect("checked above");
-        let spec_bytes = match packaged_loading_slide_spec(&self.wasm_runtime.engine) {
-            Ok(bytes) => {
-                log::info!("loaded packaged bootstrap slide from embedded loading.vzglyd");
-                bytes
-            }
-            Err(error) => {
-                log::warn!(
-                    "failed to load packaged bootstrap slide: {error}; falling back to synthetic loading spec"
-                );
-                LOADING_SPEC_BYTES.clone()
-            }
-        };
-
-        match create_slide_renderer(ctx, &spec_bytes) {
+        match load_wasm_slide_from_bytes(LOADING_SLIDE)
+            .map_err(|error| format!("loading slide: {error}"))
+            .and_then(|(slide, _manifest)| create_loaded_slide_renderer(ctx, slide))
+        {
             Ok(renderer) => {
                 self.bootstrap_renderer = Some(LoadedSlideRenderer {
                     renderer,
-                    duration_secs: 0.0,
-                    _extracted: None,
+                    manifest: None,
                 });
                 self.set_window_title(scene_title(LOADING_SCENE_PATH));
                 log::info!("startup bootstrap loading renderer initialized");
             }
             Err(error) => {
                 log::error!("failed to initialize bootstrap loading renderer: {error}");
-                if let Some(path) = self.slide_paths.first() {
-                    self.set_window_title(scene_title(path));
+                if let Some(slide) = self.slides.first() {
+                    self.set_window_title(scene_title(&slide.path));
                 }
             }
         }
@@ -339,10 +260,10 @@ impl NativeApp {
     /// Compiling WASM via Cranelift is CPU-bound and slow in debug builds. Running
     /// it off the event loop thread lets the window appear and stay responsive.
     fn start_background_load(&mut self) {
-        if self.slide_paths.is_empty() {
+        if self.slides.is_empty() {
             eprintln!("[vzglyd] no slides to load — window will stay blank");
             log::warn!(
-                "No slides to load — pass --slides-dir <path> pointing at a directory with .vzglyd files or playlist.json"
+                "No slides to load — check the configured slide source"
             );
             return;
         }
@@ -350,23 +271,17 @@ impl NativeApp {
         let (tx, rx) = mpsc::channel();
         self.pending_rx = Some(rx);
 
-        let paths = self.slide_paths.clone();
-        // Engine is Clone + Send + Sync — safe to pass to a background thread.
-        let engine = self.wasm_runtime.engine.clone();
+        let slides = self.slides.clone();
 
         eprintln!(
             "[vzglyd] spawning background loader for {} slide(s)",
-            paths.len()
-        );
-        eprintln!(
-            "[vzglyd] TIP: `cargo run --release -- --slides-dir <dir>` compiles WASM ~10× faster"
+            slides.len()
         );
 
         std::thread::spawn(move || {
-            for (idx, path) in paths.iter().enumerate() {
-                eprintln!("[loader] {}/{}: {}", idx + 1, paths.len(), path);
-
-                let result = compile_slide_spec(&engine, path, idx);
+            for (idx, slide) in slides.iter().enumerate() {
+                eprintln!("[loader] {}/{}: {}", idx + 1, slides.len(), slide.path);
+                let result = load_slide_package(idx, slide);
                 let send_result = tx.send(result);
                 if send_result.is_err() {
                     // Main thread dropped the receiver — exit early.
@@ -390,18 +305,24 @@ impl NativeApp {
                     log::info!(
                         "[main] creating GPU renderer for slide {}: {}",
                         pending.idx,
-                        pending.path
+                        pending.package.path
                     );
                     while self.slide_renderers.len() <= pending.idx {
                         self.slide_renderers.push(None);
                     }
-                    match create_slide_renderer(ctx, &pending.spec_bytes) {
+                    let manifest = pending.package.manifest;
+                    match create_loaded_slide_renderer(ctx, pending.package.slide) {
                         Ok(renderer) => {
                             self.slide_renderers[pending.idx] = Some(LoadedSlideRenderer {
                                 renderer,
-                                duration_secs: 7.0,
-                                _extracted: pending._extracted,
+                                manifest: manifest.clone(),
                             });
+                            if let Some(engine) = &mut self.engine {
+                                engine.apply_manifest_metadata(
+                                    pending.idx,
+                                    manifest_schedule_metadata(manifest.as_ref()),
+                                );
+                            }
                             log::info!("[main] slide {} ready", pending.idx);
                             any = true;
                         }
@@ -443,6 +364,18 @@ impl NativeApp {
         }
     }
 
+    fn sync_renderer_activity(&mut self, frame_state: &FrameRenderState) {
+        let current_idx = frame_state.current_slide_idx;
+        let next_idx = frame_state.next_slide_idx;
+
+        for (idx, renderer) in self.slide_renderers.iter_mut().enumerate() {
+            if let Some(renderer) = renderer {
+                let active = idx == current_idx || Some(idx) == next_idx;
+                renderer.renderer.set_active(active);
+            }
+        }
+    }
+
     fn update_and_render_renderer(
         renderer: &mut LoadedSlideRenderer,
         ctx: &GpuContext,
@@ -451,11 +384,11 @@ impl NativeApp {
     ) {
         match &mut renderer.renderer {
             SlideRenderer::Screen(screen) => {
-                screen.update(dt);
+                screen.update(ctx, dt);
                 screen.render(ctx, target);
             }
             SlideRenderer::World(world) => {
-                world.update(dt);
+                world.update(ctx, dt);
                 world.render(ctx, target);
             }
         }
@@ -488,6 +421,7 @@ impl NativeApp {
             };
 
             if let Some(renderer) = self.bootstrap_renderer.as_mut() {
+                renderer.renderer.set_active(true);
                 Self::update_and_render_renderer(renderer, ctx, target, dt);
             } else {
                 clear_target(ctx, target, wgpu::Color::BLACK);
@@ -526,6 +460,7 @@ impl NativeApp {
         }
 
         let current_idx = frame_state.current_slide_idx;
+        self.sync_renderer_activity(&frame_state);
 
         self.ensure_offscreen(current_idx);
         if let Some(next_idx) = frame_state.next_slide_idx {
@@ -655,76 +590,35 @@ impl NativeApp {
 // Background loading helpers
 // ---------------------------------------------------------------------------
 
-/// Compiles WASM and reads spec bytes for a single slide path.
-///
-/// This is the slow, CPU-bound step (Cranelift JIT) — run it off the main thread.
-fn compile_slide_spec(
-    engine: &wasmtime::Engine,
-    path: &str,
+fn load_slide_package(
     idx: usize,
+    slide: &ScheduledSlide,
 ) -> Result<PendingSlide, (usize, String, String)> {
     macro_rules! bail {
         ($msg:expr) => {
-            return Err((idx, path.to_string(), $msg))
+            return Err((idx, slide.path.clone(), $msg))
         };
     }
 
-    let p = std::path::Path::new(path);
-
-    let (wasm_path, extracted) = if p.extension().and_then(|e| e.to_str()) == Some("vzglyd") {
-        log::info!("[loader] extracting archive: {}", path);
-        let pkg = match extract_archive(p) {
-            Ok(p) => p,
-            Err(e) => bail!(format!("extract: {}", e)),
-        };
-        let wasm = pkg.path.join("slide.wasm");
-        if !wasm.exists() {
-            bail!(format!("no slide.wasm inside {}", path));
-        }
-        (wasm.to_string_lossy().to_string(), Some(pkg))
-    } else if p.is_dir() {
-        let wasm = p.join("slide.wasm");
-        if !wasm.exists() {
-            bail!(format!("no slide.wasm in directory {}", path));
-        }
-        (wasm.to_string_lossy().to_string(), None)
-    } else {
-        (path.to_string(), None)
+    let params_bytes = slide
+        .params
+        .as_ref()
+        .map(|value| serde_json::to_vec(value).expect("params serialization is infallible"));
+    let (loaded, manifest) = match load_wasm_slide(&slide.path, params_bytes.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(error) => bail!(format!("slide load failed: {error}")),
     };
-
-    eprintln!("[loader] compiling WASM: {}", wasm_path);
-    eprintln!("[loader]   (Cranelift JIT — takes ~10s in release, ~5min in debug)");
-    let t0 = std::time::Instant::now();
-    let module = match wasmtime::Module::from_file(engine, &wasm_path) {
-        Ok(m) => m,
-        Err(e) => bail!(format!("WASM compile: {}", e)),
-    };
-    eprintln!(
-        "[loader] compiled in {:.1}s; instantiating…",
-        t0.elapsed().as_secs_f32()
-    );
-
-    let mut instance = match SlideInstance::new(&module) {
-        Ok(i) => i,
-        Err(e) => bail!(format!("instantiate: {}", e)),
-    };
-    eprintln!("[loader] reading spec bytes from vzglyd_init()…");
-
-    let spec_bytes = match instance.read_spec_bytes() {
-        Ok(b) => b,
-        Err(e) => bail!(format!("spec read: {}", e)),
-    };
-    eprintln!(
-        "[loader] slide {} spec ready ({} bytes)",
-        idx,
-        spec_bytes.len()
-    );
+    if let Err(error) = loaded.validate() {
+        bail!(format!("slide validation failed: {error}"));
+    }
 
     Ok(PendingSlide {
         idx,
-        path: path.to_string(),
-        spec_bytes,
-        _extracted: extracted,
+        package: LoadedSlidePackage {
+            slide: loaded,
+            manifest,
+            path: slide.path.clone(),
+        },
     })
 }
 
@@ -732,8 +626,40 @@ fn compile_slide_spec(
 // Schedule helpers
 // ---------------------------------------------------------------------------
 
-/// Builds the kernel schedule and returns the ordered absolute slide paths.
-fn load_schedule(engine: &mut Engine, slides_dir: &str) -> Vec<String> {
+fn manifest_schedule_metadata(manifest: Option<&SlideManifest>) -> SlideManifestMetadata {
+    SlideManifestMetadata {
+        duration_secs: manifest
+            .and_then(|manifest| manifest.display_duration_seconds())
+            .map(|seconds| seconds as f32),
+        transition_in: manifest.and_then(SlideManifest::transition_in_kind),
+        transition_out: manifest.and_then(SlideManifest::transition_out_kind),
+    }
+}
+
+fn schedule_snapshot(engine: &Engine) -> Vec<ScheduledSlide> {
+    engine
+        .schedule_entries()
+        .iter()
+        .map(|entry: &SlideEntry| ScheduledSlide {
+            path: entry.path.clone(),
+            params: entry.params.clone(),
+        })
+        .collect()
+}
+
+/// Builds the kernel schedule and returns the ordered slide metadata.
+fn load_schedule(engine: &mut Engine, run_config: &RunConfig) -> Vec<ScheduledSlide> {
+    if let Some(scene_path) = run_config.scene_path.as_ref() {
+        eprintln!("[vzglyd] single-scene mode: {scene_path}");
+        engine.set_schedule(vec![scene_path.clone()]);
+        return schedule_snapshot(engine);
+    }
+
+    let Some(slides_dir) = run_config.slides_dir.as_deref() else {
+        eprintln!("[vzglyd] no slide source configured");
+        return Vec::new();
+    };
+
     let playlist_path = std::path::Path::new(slides_dir).join("playlist.json");
     eprintln!(
         "[vzglyd] looking for playlist: {} (exists={})",
@@ -745,15 +671,16 @@ fn load_schedule(engine: &mut Engine, slides_dir: &str) -> Vec<String> {
         match std::fs::read(&playlist_path) {
             Ok(bytes) => match parse_playlist(&bytes) {
                 Ok(playlist) => {
-                    let paths = build_schedule_from_playlist(&playlist, slides_dir);
+                    engine.set_schedule_from_playlist(&playlist, slides_dir);
+                    let slides = schedule_snapshot(engine);
+                    let paths: Vec<&str> = slides.iter().map(|slide| slide.path.as_str()).collect();
                     eprintln!(
                         "[vzglyd] playlist.json: {} total entries, {} enabled → {:?}",
                         playlist.slides.len(),
-                        paths.len(),
+                        slides.len(),
                         paths
                     );
-                    engine.set_schedule_from_playlist(&playlist, slides_dir);
-                    return paths;
+                    return slides;
                 }
                 Err(e) => eprintln!(
                     "[vzglyd] WARNING: playlist.json parse failed: {} — falling back to discovery",
@@ -775,7 +702,7 @@ fn load_schedule(engine: &mut Engine, slides_dir: &str) -> Vec<String> {
     let paths = discover_slide_paths(slides_dir);
     eprintln!("[vzglyd] discovered: {:?}", paths);
     engine.set_schedule(paths.clone());
-    paths
+    schedule_snapshot(engine)
 }
 
 /// Scans `dir` (non-recursively) for `.vzglyd` archives and slide directories.
@@ -812,8 +739,8 @@ fn scene_title(path: &str) -> String {
     format!("VZGLYD — {label}")
 }
 
-fn initial_window_title(paths: &[String]) -> String {
-    if paths.is_empty() {
+fn initial_window_title(slides: &[ScheduledSlide]) -> String {
+    if slides.is_empty() {
         "VZGLYD".to_string()
     } else {
         scene_title(LOADING_SCENE_PATH)
@@ -961,7 +888,7 @@ impl ApplicationHandler for NativeApp {
             return;
         }
 
-        let initial_title = initial_window_title(&self.slide_paths);
+        let initial_title = initial_window_title(&self.slides);
         let window = event_loop
             .create_window(build_window_attributes(event_loop, &initial_title))
             .expect("Failed to create window");
@@ -979,8 +906,8 @@ impl ApplicationHandler for NativeApp {
 
         self.try_init_bootstrap_renderer();
         if self.bootstrap_renderer.is_none() {
-            if let Some(path) = self.slide_paths.first() {
-                self.set_window_title(scene_title(path));
+            if let Some(slide) = self.slides.first() {
+                self.set_window_title(scene_title(&slide.path));
             }
         }
 

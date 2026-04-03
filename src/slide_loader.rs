@@ -420,7 +420,7 @@ fn call_teardown_with_timeout<T>(
 
 fn arm_teardown_timeout(engine: Engine, timeout: Duration) -> Result<(), LoadError> {
     std::thread::Builder::new()
-        .name("vzglyd-slide-teardown-timeout".into())
+        .name("VRX-64-slide-teardown-timeout".into())
         .spawn(move || {
             std::thread::sleep(timeout);
             engine.increment_epoch();
@@ -667,7 +667,7 @@ fn load_sidecar_with_executor(
         wasi_preopens.len()
     );
     let thread = std::thread::Builder::new()
-        .name("vzglyd-sidecar".into())
+        .name("VRX-64-sidecar".into())
         .spawn(move || {
             log::info!("sidecar:{} thread started", runtime_label);
             let result = run_sidecar_module(
@@ -3130,7 +3130,7 @@ mod tests {
     }
 
     fn reference_scene_anchor_wasm() -> Vec<u8> {
-        std::fs::read("../vzglyd-courtyard/courtyard.wasm").expect("read courtyard wasm")
+        std::fs::read("../VRX-64-courtyard/courtyard.wasm").expect("read courtyard wasm")
     }
 
     fn write_png(path: &Path, width: u32, height: u32, data: &[u8]) {

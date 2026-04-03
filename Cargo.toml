@@ -1,5 +1,5 @@
 [package]
-name = "vzglyd-native"
+name = "VRX-64-native"
 version = "0.1.0"
 edition = "2024"
 description = "Native host for VZGLYD display engine (Linux/Raspberry Pi)"
@@ -21,9 +21,9 @@ codegen-units = 1
 
 [dependencies]
 # Kernel crates
-vzglyd-kernel = { path = "../vzglyd-kernel" }
-vzglyd-slide = { git = "https://github.com/vzglyd/vzglyd-slide", features = ["gpu"] }
-vzglyd-sidecar = { path = "../lume-sidecar" }
+vzglyd_kernel = { package = "VRX-64-kernel", path = "../VRX-64-kernel" }
+vzglyd_slide = { package = "VRX-64-slide", git = "https://github.com/vzglyd/VRX-64-slide", features = ["gpu"] }
+vzglyd_sidecar = { package = "VRX-64-sidecar", path = "../lume-sidecar" }
 
 # Windowing
 winit = "0.30"

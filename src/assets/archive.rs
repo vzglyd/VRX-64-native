@@ -20,7 +20,7 @@ pub fn extract_archive(archive_path: &Path) -> Result<TempPackage, String> {
         h.finish()
     };
     let temp_dir =
-        std::env::temp_dir().join(format!("vzglyd-{}-{:x}", std::process::id(), path_hash));
+        std::env::temp_dir().join(format!("VRX-64-{}-{:x}", std::process::id(), path_hash));
 
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
 

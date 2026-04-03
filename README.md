@@ -4,7 +4,7 @@ Native (Linux/Raspberry Pi) host implementation for the VZGLYD display engine.
 
 ## Overview
 
-This crate integrates the platform-agnostic `vzglyd-kernel` with:
+This crate integrates the platform-agnostic `VRX-64-kernel` with:
 - **winit** for windowing and event handling
 - **wgpu** for GPU rendering
 - **wasmtime** for WASM slide instantiation

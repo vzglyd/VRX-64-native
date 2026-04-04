@@ -100,6 +100,13 @@ impl SlidePipelines {
             .or(self.transparent.as_ref())
             .map(|pipeline| pipeline.as_ref())
     }
+
+    pub fn overlay(&self) -> Option<&wgpu::RenderPipeline> {
+        self.transparent
+            .as_ref()
+            .or(self.opaque.as_ref())
+            .map(|pipeline| pipeline.as_ref())
+    }
 }
 
 pub struct LoadedScreenSlide {
@@ -263,7 +270,7 @@ impl ScreenSlideRenderer {
             "screen_slide",
         )?;
 
-        let overlay = if spec.overlay.is_none()
+        let mut overlay = if spec.overlay.is_none()
             && !runtime
                 .as_ref()
                 .is_some_and(slide_loader::SlideRuntime::has_overlay)
@@ -292,6 +299,10 @@ impl ScreenSlideRenderer {
                 limits: spec.limits,
             })
         };
+
+        if let (Some(overlay_runtime), Some(static_overlay)) = (overlay.as_mut(), spec.overlay.as_ref()) {
+            overlay_runtime.apply(ctx, static_overlay);
+        }
 
         let background_scene = background_scene
             .map(|scene| {
@@ -445,7 +456,7 @@ impl ScreenSlideRenderer {
 
             if let Some(overlay) = &self.overlay {
                 if overlay.buffers.current_index_count > 0 {
-                    if let Some(pipeline) = self.pipelines.first() {
+                    if let Some(pipeline) = self.pipelines.overlay() {
                         pass.set_pipeline(pipeline);
                         pass.set_vertex_buffer(0, overlay.buffers.vertex_buffer.slice(..));
                         pass.set_index_buffer(

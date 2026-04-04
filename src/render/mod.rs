@@ -5,9 +5,9 @@ pub mod slide;
 pub mod transition;
 
 pub use slide::{
-    DynamicMeshBuffers, MeshBuffers, ScreenBindGroup, ScreenSlideRenderer, ScreenUniforms,
-    SlidePipelines, SlideRenderer, SlideTexture, WorldBindGroup, WorldSlideRenderer, WorldUniforms,
-    LoadedSlide, LoadedScreenSlide, LoadedWorldSlide, create_loaded_slide_renderer,
+    DynamicMeshBuffers, LoadedScreenSlide, LoadedSlide, LoadedWorldSlide, MeshBuffers,
+    ScreenBindGroup, ScreenSlideRenderer, ScreenUniforms, SlidePipelines, SlideRenderer,
+    SlideTexture, WorldBindGroup, WorldSlideRenderer, WorldUniforms, create_loaded_slide_renderer,
     create_slide_renderer, load_wasm_slide, load_wasm_slide_from_bytes,
 };
 

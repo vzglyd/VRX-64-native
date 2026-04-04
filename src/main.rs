@@ -121,7 +121,8 @@ fn parse_pack_command(args: &[String]) -> Result<Command, String> {
 fn parse_run_command(args: &[String]) -> Result<RunConfig, String> {
     let mut slides_dir = Some(DEFAULT_SLIDES_DIR.to_string());
     let mut scene_path = None;
-    let mut trace_session = None;
+    let mut trace = false;
+    let mut trace_out = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -146,10 +147,20 @@ fn parse_run_command(args: &[String]) -> Result<RunConfig, String> {
                 i += 2;
             }
             "--trace-session" => {
+                return Err(
+                    "--trace-session has been replaced by --trace [--trace-out <PATH>]".into(),
+                );
+            }
+            "--trace" => {
+                trace = true;
+                i += 1;
+            }
+            "--trace-out" => {
                 let Some(path) = args.get(i + 1) else {
-                    return Err("missing path after --trace-session".into());
+                    return Err("missing path after --trace-out".into());
                 };
-                trace_session = Some(path.clone());
+                trace = true;
+                trace_out = Some(path.clone());
                 i += 2;
             }
             "-h" | "--help" => {
@@ -165,7 +176,8 @@ fn parse_run_command(args: &[String]) -> Result<RunConfig, String> {
     Ok(RunConfig {
         slides_dir,
         scene_path,
-        trace_session,
+        trace,
+        trace_out,
     })
 }
 
@@ -192,13 +204,16 @@ fn print_help() {
     println!("VZGLYD Native Host");
     println!();
     println!("Usage:");
-    println!("  vzglyd [--slides-dir <DIR> | --scene <PATH>] [--verbose]");
+    println!(
+        "  vzglyd [--slides-dir <DIR> | --scene <PATH>] [--trace] [--trace-out <PATH>] [--verbose]"
+    );
     println!("  vzglyd pack <slide-dir> -o <archive.vzglyd> [--verbose]");
     println!();
     println!("Options:");
     println!("  -d, --slides-dir <DIR>  Shared slides repo root (expects playlist.json)");
     println!("      --scene <PATH>      Run a single slide package directly");
-    println!("      --trace-session <DIR>  Write Perfetto trace output into DIR");
+    println!("      --trace             Capture a Perfetto trace and write it on exit");
+    println!("      --trace-out <PATH>  Override the output trace file path");
     println!("  -v, --verbose           Enable verbose logging");
     println!("  -h, --help              Print this help message");
     println!();
@@ -217,6 +232,8 @@ mod tests {
         let run = parse_run_command(&[]).expect("parse run");
         assert_eq!(run.slides_dir.as_deref(), Some(DEFAULT_SLIDES_DIR));
         assert_eq!(run.scene_path, None);
+        assert!(!run.trace);
+        assert_eq!(run.trace_out, None);
     }
 
     #[test]
@@ -224,6 +241,21 @@ mod tests {
         let run = parse_run_command(&["--scene".into(), "demo.vzglyd".into()]).expect("parse");
         assert_eq!(run.scene_path.as_deref(), Some("demo.vzglyd"));
         assert_eq!(run.slides_dir, None);
+    }
+
+    #[test]
+    fn run_command_enables_trace_with_default_output() {
+        let run = parse_run_command(&["--trace".into()]).expect("parse");
+        assert!(run.trace);
+        assert_eq!(run.trace_out, None);
+    }
+
+    #[test]
+    fn run_command_accepts_trace_out() {
+        let run = parse_run_command(&["--trace-out".into(), "/tmp/out.perfetto.json".into()])
+            .expect("parse");
+        assert!(run.trace);
+        assert_eq!(run.trace_out.as_deref(), Some("/tmp/out.perfetto.json"));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
-use vzglyd_slide::ABI_VERSION;
 use thiserror::Error;
+use vzglyd_slide::ABI_VERSION;
 
 use vzglyd_kernel::TransitionKind;
 

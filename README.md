@@ -29,7 +29,10 @@ cargo run -- --slides-dir slides/
 cargo run -- --slides-dir slides/ -v
 
 # Run a single bundle with tracing enabled
-cargo run -- --trace-session /tmp/trace/native --scene /path/to/slide.vzglyd
+cargo run -- --trace --scene /path/to/slide.vzglyd
+
+# Write the trace to a specific file
+cargo run -- --trace --trace-out /tmp/slide.perfetto.json --scene /path/to/slide.vzglyd
 ```
 
 ## Shared Slides Repo
@@ -54,9 +57,9 @@ when you want to run one bundle directly without the shared repo contract.
 
 ## Tracing
 
-Use `--trace-session <DIR>` to write a Perfetto-compatible `trace.json` and `session.json`.
-
-For the full collection workflow, session bootstrap, browser collector, and comparison tooling, use the sibling repo `VRX-64-tracing`.
+Use `--trace` to capture a Perfetto artifact and write it automatically on exit.
+Use `--trace-out <PATH>` to override the default output path under `./traces/`.
+The host prints the final artifact path when it flushes.
 
 ## Architecture
 

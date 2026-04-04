@@ -2,10 +2,10 @@
 //!
 //! Integrates the kernel with winit event loop and wgpu rendering.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use vzglyd_kernel::TransitionKind as KernelTransitionKind;
 use vzglyd_kernel::schedule::{PLAYLIST_FILENAME, Playlist, parse_playlist};
 use vzglyd_kernel::{
@@ -40,7 +40,8 @@ const X11_BORDERLESS_INSET: u32 = 1;
 pub struct RunConfig {
     pub slides_dir: Option<String>,
     pub scene_path: Option<String>,
-    pub trace_session: Option<String>,
+    pub trace: bool,
+    pub trace_out: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -137,9 +138,10 @@ impl<'a> Host for HostWrapper<'a> {
 impl NativeApp {
     /// Creates a new native application.
     pub fn new(run_config: RunConfig) -> Result<Self, String> {
-        let trace_recorder = if let Some(trace_dir) = run_config.trace_session.as_deref() {
+        let trace_recorder = if run_config.trace {
+            let trace_path = resolve_trace_output_path(&run_config);
             let recorder = vzglyd_kernel::trace::TraceRecorder::new(
-                trace_dir,
+                &trace_path,
                 "native",
                 trace_label(&run_config),
             )
@@ -619,7 +621,23 @@ impl NativeApp {
 impl Drop for NativeApp {
     fn drop(&mut self) {
         if let Some(recorder) = self.trace_recorder.take() {
-            let _ = recorder.flush();
+            match recorder.flush() {
+                Ok(path) => {
+                    let size_bytes = std::fs::metadata(&path).ok().map(|meta| meta.len());
+                    match size_bytes {
+                        Some(size) => eprintln!(
+                            "[vzglyd] trace written: {} ({} bytes)",
+                            path.display(),
+                            size
+                        ),
+                        None => eprintln!("[vzglyd] trace written: {}", path.display()),
+                    }
+                    eprintln!("[vzglyd] open the trace in Perfetto: https://ui.perfetto.dev/");
+                }
+                Err(error) => {
+                    eprintln!("[vzglyd] failed to flush trace: {error}");
+                }
+            }
         }
         set_active_trace_recorder(None);
     }
@@ -659,6 +677,48 @@ fn load_slide_package(
             path: slide.path.clone(),
         },
     })
+}
+
+fn resolve_trace_output_path(run_config: &RunConfig) -> PathBuf {
+    if let Some(path) = run_config.trace_out.as_deref() {
+        return PathBuf::from(path);
+    }
+
+    let source = run_config
+        .scene_path
+        .as_deref()
+        .and_then(|path| Path::new(path).file_stem())
+        .and_then(|stem| stem.to_str())
+        .or_else(|| {
+            run_config
+                .slides_dir
+                .as_deref()
+                .and_then(|path| Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+        })
+        .unwrap_or("session");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    PathBuf::from("traces").join(format!(
+        "vzglyd-native-{}-{timestamp}.perfetto.json",
+        sanitize_trace_component(source)
+    ))
+}
+
+fn sanitize_trace_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if sanitized.is_empty() {
+        "session".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn trace_label(run_config: &RunConfig) -> String {
@@ -851,6 +911,31 @@ mod tests {
         let error = validate_shared_repo_bundle_path("../clock.vzglyd")
             .expect_err("expected validation error");
         assert!(error.contains("'.' or '..'"));
+    }
+
+    #[test]
+    fn default_trace_output_uses_perfetto_extension() {
+        let path = resolve_trace_output_path(&RunConfig {
+            slides_dir: None,
+            scene_path: Some("/slides/air_quality.vzglyd".to_string()),
+            trace: true,
+            trace_out: None,
+        });
+        let path_str = path.to_string_lossy();
+        assert!(path_str.starts_with("traces/"));
+        assert!(path_str.ends_with(".perfetto.json"));
+        assert!(path_str.contains("air-quality"));
+    }
+
+    #[test]
+    fn explicit_trace_output_path_wins() {
+        let path = resolve_trace_output_path(&RunConfig {
+            slides_dir: Some("slides".to_string()),
+            scene_path: None,
+            trace: true,
+            trace_out: Some("/tmp/custom.perfetto.json".to_string()),
+        });
+        assert_eq!(path, PathBuf::from("/tmp/custom.perfetto.json"));
     }
 }
 

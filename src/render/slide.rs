@@ -17,7 +17,6 @@ use crate::slide::{DecodedSlideSpec, decode_slide_spec};
 use crate::slide_loader::{self, LoadError};
 use vzglyd_kernel::manifest::SlideManifest;
 use crate::trace::active_trace_recorder;
-use crate::utils::clock::local_clock_seconds;
 
 /// Uniforms for screen-space slides.
 #[repr(C)]
@@ -39,7 +38,6 @@ pub struct WorldUniforms {
     pub fog_color: [f32; 4],
     pub fog_start: f32,
     pub fog_end: f32,
-    pub clock_seconds: f32,
     pub _pad: f32,
     pub ambient_light: [f32; 4],
     pub main_light_dir: [f32; 4],
@@ -806,7 +804,6 @@ impl WorldSlideRenderer {
             fog_color: [0.0, 0.0, 0.0, 1.0],
             fog_start: 18.0,
             fog_end: 75.0,
-            clock_seconds: local_clock_seconds(),
             _pad: 0.0,
             ambient_light: pack_ambient_light(&self.lighting),
             main_light_dir: pack_main_light_dir(&self.lighting),

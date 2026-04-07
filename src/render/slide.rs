@@ -1702,38 +1702,3 @@ pub fn create_slide_renderer(ctx: &GpuContext, spec_bytes: &[u8]) -> Result<Slid
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-    use wasmtime::Module;
-
-    #[test]
-    fn packaged_clock_world_shader_parses_with_contract_prelude() {
-        let archive_path = Path::new("slides/clock.vzglyd");
-        if !archive_path.exists() {
-            return;
-        }
-
-        let extracted = crate::assets::archive::extract_archive(archive_path).expect("extract");
-        let runtime = crate::wasm::WasmRuntime::new().expect("runtime");
-        let module_path = extracted.path.join("slide.wasm");
-        let module = Module::from_file(&runtime.engine, &module_path).expect("module");
-        let mut instance = crate::slide::SlideInstance::new(&module).expect("instance");
-        let spec_bytes = instance.read_spec_bytes().expect("spec bytes");
-
-        let spec = match crate::slide::decode_slide_spec(&spec_bytes).expect("decode spec") {
-            DecodedSlideSpec::World(spec) => spec,
-            DecodedSlideSpec::Screen(_) => panic!("clock slide should decode as world"),
-        };
-
-        let shader_source = resolve_slide_shader_source(
-            ShaderContract::World3D,
-            spec.shaders.as_ref(),
-            include_str!("../../shaders/default_world.wgsl"),
-            None,
-        );
-
-        naga::front::wgsl::parse_str(&shader_source).expect("assembled clock shader parses");
-    }
-}

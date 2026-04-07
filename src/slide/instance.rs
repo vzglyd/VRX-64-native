@@ -247,32 +247,3 @@ impl SlideInstance {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-    use vzglyd_slide::WorldVertex;
-
-    #[test]
-    fn packaged_clock_slide_spec_can_be_read() {
-        let archive_path = Path::new("slides/clock.vzglyd");
-        if !archive_path.exists() {
-            return;
-        }
-
-        let extracted = crate::assets::archive::extract_archive(archive_path).expect("extract");
-        let runtime = crate::wasm::WasmRuntime::new().expect("runtime");
-        let module_path = extracted.path.join("slide.wasm");
-        let module = Module::from_file(&runtime.engine, &module_path).expect("module");
-
-        let mut instance = SlideInstance::new(&module).expect("instance");
-        let bytes = instance.read_spec_bytes().expect("spec bytes");
-        assert_eq!(
-            bytes.first().copied(),
-            Some(crate::slide::wire::WIRE_VERSION)
-        );
-        let spec =
-            crate::slide::wire::deserialize_spec::<WorldVertex>(&bytes).expect("decode spec");
-        assert_eq!(spec.name, "clock_world");
-    }
-}

@@ -32,7 +32,7 @@ use crate::render::{
     LoadedSlide, SlideRenderer, TransitionKind, TransitionRenderer, create_loaded_slide_renderer,
     load_wasm_slide, load_wasm_slide_from_bytes,
 };
-use crate::slide_manifest::SlideManifest;
+use vzglyd_kernel::manifest::SlideManifest;
 use crate::trace::set_active_trace_recorder;
 
 const LOADING_SCENE_PATH: &str = "$loading";

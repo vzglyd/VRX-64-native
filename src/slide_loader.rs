@@ -30,7 +30,7 @@ use wasmtime::{Config, Engine, Instance, Memory, Module, Store, Trap, TypedFunc}
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::slide_manifest::{AssetRef, SlideManifest};
+use vzglyd_kernel::manifest::{AssetRef, SlideManifest};
 use crate::trace::{
     active_trace_recorder, parse_guest_trace_end_payload, parse_guest_trace_payload,
 };
@@ -2838,7 +2838,7 @@ pub(crate) fn load_manifest(manifest_path: &Path) -> Result<SlideManifest, LoadE
         serde_json::from_str(&manifest_str).map_err(|e| LoadError::ManifestParse(e.to_string()))?;
     let package_root = manifest_path_buf.parent().unwrap_or_else(|| Path::new("."));
     manifest
-        .validate(package_root)
+        .validate(vzglyd_slide::ABI_VERSION)
         .map_err(|e| LoadError::ManifestValidation(e.to_string()))?;
     Ok(manifest)
 }

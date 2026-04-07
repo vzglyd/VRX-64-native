@@ -15,9 +15,9 @@ use crate::gpu::context::{GpuContext, HEIGHT, OffscreenTarget, WIDTH};
 use crate::render::shader_contract::{ShaderContract, assemble_slide_shader_source};
 use crate::slide::{DecodedSlideSpec, decode_slide_spec};
 use crate::slide_loader::{self, LoadError};
-use crate::slide_manifest::SlideManifest;
+use vzglyd_kernel::manifest::SlideManifest;
 use crate::trace::active_trace_recorder;
-use crate::utils::clock::melbourne_clock_seconds;
+use crate::utils::clock::local_clock_seconds;
 
 /// Uniforms for screen-space slides.
 #[repr(C)]
@@ -806,7 +806,7 @@ impl WorldSlideRenderer {
             fog_color: [0.0, 0.0, 0.0, 1.0],
             fog_start: 18.0,
             fog_end: 75.0,
-            clock_seconds: melbourne_clock_seconds(),
+            clock_seconds: local_clock_seconds(),
             _pad: 0.0,
             ambient_light: pack_ambient_light(&self.lighting),
             main_light_dir: pack_main_light_dir(&self.lighting),

@@ -127,6 +127,10 @@ pub struct GpuContext {
     pub blit_pipeline: Arc<RenderPipeline>,
     pub blit_bind_group_layout: Arc<BindGroupLayout>,
     pub blit_sampler: Arc<Sampler>,
+    /// Uniform buffer holding the current display scale for the blit shader.
+    pub blit_scale_buf: Arc<wgpu::Buffer>,
+    /// The active display scale (default 1.0).
+    pub display_scale: f32,
 }
 
 impl GpuContext {
@@ -196,6 +200,16 @@ impl GpuContext {
         let (blit_pipeline, blit_bind_group_layout, blit_sampler) =
             Self::create_blit_pipeline(&device, format);
 
+        // Uniform buffer for blit display scale (16-byte minimum for wgpu uniforms).
+        let blit_scale_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blit_scale_uniform"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        // Write default scale of 1.0.
+        queue.write_buffer(&blit_scale_buf, 0, bytemuck::bytes_of(&1.0f32));
+
         Ok(Self {
             device,
             queue,
@@ -207,6 +221,8 @@ impl GpuContext {
             blit_pipeline,
             blit_bind_group_layout,
             blit_sampler,
+            blit_scale_buf,
+            display_scale: 1.0,
         })
     }
 
@@ -269,6 +285,16 @@ impl GpuContext {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -415,8 +441,39 @@ impl GpuContext {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.blit_scale_buf.as_entire_binding(),
+                },
             ],
         })
+    }
+
+    /// Update the display scale written into the blit uniform buffer.
+    ///
+    /// The change takes effect on the next frame. A scale of `1.0` fills the
+    /// letterbox rect exactly; values below `1.0` add a black border (useful for
+    /// CRT overscan); values above `1.0` zoom in and crop the edges.
+    pub fn set_display_scale(&mut self, scale: f32) {
+        self.display_scale = scale;
+        self.queue.write_buffer(&self.blit_scale_buf, 0, bytemuck::bytes_of(&scale));
+    }
+
+    /// Returns the pixel rect actually occupied by the visible slide image,
+    /// accounting for the display scale.
+    ///
+    /// For `scale >= 1.0` this equals [`surface_blit_rect`] (the image fills or
+    /// exceeds the letterbox area).  For `scale < 1.0` this is the centred,
+    /// scaled-down sub-rect.  Use this rect for the HUD overlay viewport so the
+    /// border aligns with the visible image edges.
+    pub fn surface_display_rect(&self) -> (u32, u32, u32, u32) {
+        let (bx, by, bw, bh) = self.surface_blit_rect();
+        let s = self.display_scale.min(1.0); // clamp: scale > 1.0 still fills blit rect
+        let sw = (bw as f32 * s).round() as u32;
+        let sh = (bh as f32 * s).round() as u32;
+        let sx = bx + bw.saturating_sub(sw) / 2;
+        let sy = by + bh.saturating_sub(sh) / 2;
+        (sx, sy, sw.max(1), sh.max(1))
     }
 
     /// Blits an offscreen target to the surface with letterboxing.

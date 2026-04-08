@@ -77,6 +77,9 @@ pub struct NativeApp {
 
     // Slide management
     run_config: RunConfig,
+    /// Display scale from `playlist.json` (default 1.0). Applied to the blit
+    /// shader so that scale < 1.0 adds a black border for CRT overscan safety.
+    display_scale: f32,
     /// Resolved, ordered schedule metadata cloned from the kernel after setup.
     slides: Vec<ScheduledSlide>,
     bootstrap_renderer: Option<LoadedSlideRenderer>,
@@ -178,6 +181,7 @@ impl NativeApp {
             last_frame: None,
             running: false,
             run_config,
+            display_scale: 1.0,
             slides: Vec::new(),
             bootstrap_renderer: None,
             bootstrap_target: None,
@@ -205,7 +209,9 @@ impl NativeApp {
         if let Some(mut engine) = app.engine.take() {
             let mut host = HostWrapper { app: &mut app };
             engine.init(&mut host);
-            app.slides = load_schedule(&mut engine, &app.run_config)?;
+            let (slides, display_scale) = load_schedule(&mut engine, &app.run_config)?;
+            app.slides = slides;
+            app.display_scale = display_scale;
             app.engine = Some(engine);
         }
 
@@ -568,7 +574,7 @@ impl NativeApp {
                     let bg = ctx.create_blit_bind_group(o);
                     if let Some(overlay) = self.overlay_renderer.as_mut() {
                         ctx.blit_and_overlay_to_surface(o, &bg, |view, encoder| {
-                            overlay.record_pass(ctx, view, encoder, slide_name.as_deref(), ctx.surface_blit_rect());
+                            overlay.record_pass(ctx, view, encoder, slide_name.as_deref(), ctx.surface_display_rect());
                         })
                     } else {
                         ctx.blit_to_surface(o, &bg)
@@ -592,7 +598,7 @@ impl NativeApp {
                         let bg = ctx.create_blit_bind_group(o);
                         if let Some(overlay) = self.overlay_renderer.as_mut() {
                             ctx.blit_and_overlay_to_surface(o, &bg, |view, encoder| {
-                                overlay.record_pass(ctx, view, encoder, slide_name.as_deref(), ctx.surface_blit_rect());
+                                overlay.record_pass(ctx, view, encoder, slide_name.as_deref(), ctx.surface_display_rect());
                             })
                         } else {
                             ctx.blit_to_surface(o, &bg)
@@ -614,7 +620,7 @@ impl NativeApp {
                     let bg = ctx.create_blit_bind_group(comp);
                     if let Some(overlay) = self.overlay_renderer.as_mut() {
                         ctx.blit_and_overlay_to_surface(comp, &bg, |view, encoder| {
-                            overlay.record_pass(ctx, view, encoder, slide_name.as_deref(), ctx.surface_blit_rect());
+                            overlay.record_pass(ctx, view, encoder, slide_name.as_deref(), ctx.surface_display_rect());
                         })
                     } else {
                         ctx.blit_to_surface(comp, &bg)
@@ -629,7 +635,7 @@ impl NativeApp {
                         let bg = ctx.create_blit_bind_group(o);
                         if let Some(overlay) = self.overlay_renderer.as_mut() {
                             ctx.blit_and_overlay_to_surface(o, &bg, |view, encoder| {
-                                overlay.record_pass(ctx, view, encoder, slide_name.as_deref(), ctx.surface_blit_rect());
+                                overlay.record_pass(ctx, view, encoder, slide_name.as_deref(), ctx.surface_display_rect());
                             })
                         } else {
                             ctx.blit_to_surface(o, &bg)
@@ -838,20 +844,22 @@ fn schedule_snapshot(engine: &Engine) -> Vec<ScheduledSlide> {
         .collect()
 }
 
-/// Builds the kernel schedule and returns the ordered slide metadata.
+/// Builds the kernel schedule and returns the ordered slide metadata plus the
+/// display scale from the playlist (defaults to `1.0` if not specified or when
+/// running in single-scene mode).
 fn load_schedule(
     engine: &mut Engine,
     run_config: &RunConfig,
-) -> Result<Vec<ScheduledSlide>, String> {
+) -> Result<(Vec<ScheduledSlide>, f32), String> {
     if let Some(scene_path) = run_config.scene_path.as_ref() {
         eprintln!("[vzglyd] single-scene mode: {scene_path}");
         engine.set_schedule(vec![scene_path.clone()]);
-        return Ok(schedule_snapshot(engine));
+        return Ok((schedule_snapshot(engine), 1.0));
     }
 
     let Some(slides_dir) = run_config.slides_dir.as_deref() else {
         eprintln!("[vzglyd] no slide source configured");
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 1.0));
     };
 
     let playlist_path = Path::new(slides_dir).join(PLAYLIST_FILENAME);
@@ -871,18 +879,20 @@ fn load_schedule(
     validate_shared_repo_playlist(&playlist)
         .map_err(|error| format!("invalid {}: {}", playlist_path.display(), error))?;
 
+    let display_scale = playlist.display_scale;
     engine.set_schedule_from_playlist(&playlist, slides_dir);
     let slides = schedule_snapshot(engine);
     let paths: Vec<&str> = slides.iter().map(|slide| slide.path.as_str()).collect();
     eprintln!(
-        "[vzglyd] {}: {} total entries, {} enabled → {:?}",
+        "[vzglyd] {}: {} total entries, {} enabled, display_scale={} → {:?}",
         PLAYLIST_FILENAME,
         playlist.slides.len(),
         slides.len(),
+        display_scale,
         paths
     );
 
-    Ok(slides)
+    Ok((slides, display_scale))
 }
 
 fn validate_shared_repo_playlist(playlist: &Playlist) -> Result<(), String> {
@@ -1100,8 +1110,9 @@ impl ApplicationHandler for NativeApp {
             .expect("Failed to create window");
         let window = Arc::new(window);
 
-        let context = pollster::block_on(GpuContext::new(window.clone()))
+        let mut context = pollster::block_on(GpuContext::new(window.clone()))
             .expect("Failed to create GPU context");
+        context.set_display_scale(self.display_scale);
         let transition_renderer = TransitionRenderer::new(&context);
         let overlay_renderer = OverlayRenderer::new(&context);
 

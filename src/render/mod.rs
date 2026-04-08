@@ -1,8 +1,11 @@
 //! Rendering module for slides and transitions.
 
 pub(crate) mod shader_contract;
+pub mod overlay;
 pub mod slide;
 pub mod transition;
+
+pub use overlay::OverlayRenderer;
 
 pub use slide::{
     DynamicMeshBuffers, LoadedScreenSlide, LoadedSlide, LoadedWorldSlide, MeshBuffers,

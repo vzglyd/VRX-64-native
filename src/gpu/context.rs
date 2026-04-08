@@ -464,6 +464,61 @@ impl GpuContext {
         Ok(())
     }
 
+    /// Blits an offscreen target to the surface and then records an overlay pass
+    /// into the same encoder before submitting and presenting.
+    ///
+    /// The closure receives the surface `TextureView` and a mutable encoder so
+    /// the overlay can append its own render pass sharing one submit/present.
+    pub fn blit_and_overlay_to_surface<F>(
+        &self,
+        _target: &OffscreenTarget,
+        bind_group: &wgpu::BindGroup,
+        record_overlay: F,
+    ) -> Result<(), wgpu::SurfaceError>
+    where
+        F: FnOnce(&wgpu::TextureView, &mut wgpu::CommandEncoder),
+    {
+        let frame = self.surface.get_current_texture()?;
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("blit_and_overlay_encoder"),
+            });
+
+        {
+            let (x, y, width, height) = self.surface_blit_rect();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blit_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.set_viewport(x as f32, y as f32, width as f32, height as f32, 0.0, 1.0);
+            pass.set_scissor_rect(x, y, width, height);
+            pass.draw(0..3, 0..1);
+        }
+
+        record_overlay(&view, &mut encoder);
+
+        self.queue.submit(Some(encoder.finish()));
+        frame.present();
+        Ok(())
+    }
+
     /// Calculates the blit rect for letterbox/pillarbox scaling.
     pub fn surface_blit_rect(&self) -> (u32, u32, u32, u32) {
         let surface_width = self.config.width.max(1);

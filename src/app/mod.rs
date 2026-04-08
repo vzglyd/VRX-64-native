@@ -29,8 +29,8 @@ use winit::platform::x11::{
 
 use crate::gpu::context::{GpuContext, HEIGHT, OffscreenTarget, WIDTH};
 use crate::render::{
-    LoadedSlide, SlideRenderer, TransitionKind, TransitionRenderer, create_loaded_slide_renderer,
-    load_wasm_slide, load_wasm_slide_from_bytes,
+    LoadedSlide, OverlayRenderer, SlideRenderer, TransitionKind, TransitionRenderer,
+    create_loaded_slide_renderer, load_wasm_slide, load_wasm_slide_from_bytes,
 };
 use vzglyd_kernel::manifest::SlideManifest;
 use crate::trace::set_active_trace_recorder;
@@ -83,6 +83,7 @@ pub struct NativeApp {
     bootstrap_target: Option<OffscreenTarget>,
     slide_renderers: Vec<Option<LoadedSlideRenderer>>,
     transition_renderer: Option<TransitionRenderer>,
+    overlay_renderer: Option<OverlayRenderer>,
     window_title: Option<String>,
 
     // Per-slide offscreen targets (indexed by schedule index).
@@ -182,6 +183,7 @@ impl NativeApp {
             bootstrap_target: None,
             slide_renderers: Vec::new(),
             transition_renderer: None,
+            overlay_renderer: None,
             window_title: None,
             offscreen_targets: Vec::new(),
             composite_target: None,
@@ -546,6 +548,16 @@ impl NativeApp {
             None => return,
         };
 
+        // Determine which slide's name to show in the overlay footer.
+        // During transitions we show the incoming (next) slide's name.
+        let display_idx = frame_state.next_slide_idx.unwrap_or(current_idx);
+        let slide_name: Option<String> = self
+            .slide_renderers
+            .get(display_idx)
+            .and_then(|r| r.as_ref())
+            .and_then(|r| r.manifest.as_ref())
+            .and_then(|m| m.name.clone());
+
         let result = match frame_state.next_slide_idx {
             None => {
                 if let Some(o) = self
@@ -554,7 +566,13 @@ impl NativeApp {
                     .and_then(|t| t.as_ref())
                 {
                     let bg = ctx.create_blit_bind_group(o);
-                    ctx.blit_to_surface(o, &bg)
+                    if let Some(overlay) = self.overlay_renderer.as_mut() {
+                        ctx.blit_and_overlay_to_surface(o, &bg, |view, encoder| {
+                            overlay.record_pass(ctx, view, encoder, slide_name.as_deref());
+                        })
+                    } else {
+                        ctx.blit_to_surface(o, &bg)
+                    }
                 } else {
                     Ok(())
                 }
@@ -572,7 +590,13 @@ impl NativeApp {
                         .and_then(|t| t.as_ref())
                     {
                         let bg = ctx.create_blit_bind_group(o);
-                        ctx.blit_to_surface(o, &bg)
+                        if let Some(overlay) = self.overlay_renderer.as_mut() {
+                            ctx.blit_and_overlay_to_surface(o, &bg, |view, encoder| {
+                                overlay.record_pass(ctx, view, encoder, slide_name.as_deref());
+                            })
+                        } else {
+                            ctx.blit_to_surface(o, &bg)
+                        }
                     } else {
                         Ok(())
                     }
@@ -588,7 +612,13 @@ impl NativeApp {
                 ) {
                     tr.render(ctx, frame_state.transition_progress, kind, out, inc, comp);
                     let bg = ctx.create_blit_bind_group(comp);
-                    ctx.blit_to_surface(comp, &bg)
+                    if let Some(overlay) = self.overlay_renderer.as_mut() {
+                        ctx.blit_and_overlay_to_surface(comp, &bg, |view, encoder| {
+                            overlay.record_pass(ctx, view, encoder, slide_name.as_deref());
+                        })
+                    } else {
+                        ctx.blit_to_surface(comp, &bg)
+                    }
                 } else {
                     // Transition renderer not ready — show incoming slide.
                     if let Some(o) = self
@@ -597,7 +627,13 @@ impl NativeApp {
                         .and_then(|t| t.as_ref())
                     {
                         let bg = ctx.create_blit_bind_group(o);
-                        ctx.blit_to_surface(o, &bg)
+                        if let Some(overlay) = self.overlay_renderer.as_mut() {
+                            ctx.blit_and_overlay_to_surface(o, &bg, |view, encoder| {
+                                overlay.record_pass(ctx, view, encoder, slide_name.as_deref());
+                            })
+                        } else {
+                            ctx.blit_to_surface(o, &bg)
+                        }
                     } else {
                         Ok(())
                     }
@@ -1067,9 +1103,11 @@ impl ApplicationHandler for NativeApp {
         let context = pollster::block_on(GpuContext::new(window.clone()))
             .expect("Failed to create GPU context");
         let transition_renderer = TransitionRenderer::new(&context);
+        let overlay_renderer = OverlayRenderer::new(&context);
 
         self.context = Some(context);
         self.transition_renderer = Some(transition_renderer);
+        self.overlay_renderer = Some(overlay_renderer);
         self.window = Some(window);
         self.window_title = Some(initial_title);
         self.running = true;

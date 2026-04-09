@@ -3,6 +3,8 @@ name = "loading-slide"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -12,3 +14,6 @@ lume-slide = { package = "VRX-64-slide", git = "https://github.com/vzglyd/VRX-64
 serde = { version = "1", features = ["derive"] }
 bytemuck = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc", "use-std"] }
+
+[patch."https://github.com/vzglyd/VRX-64-slide"]
+"VRX-64-slide" = { path = "../../VRX-64-slide" }

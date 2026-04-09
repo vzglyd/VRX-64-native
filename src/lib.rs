@@ -6,6 +6,7 @@
 //! - wgpu for GPU rendering
 //! - wasmtime for WASM slide instantiation
 //! - std::fs for asset loading
+//! - rodio for audio playback
 
 pub mod app;
 pub mod server;
@@ -17,7 +18,9 @@ pub mod slide_loader;
 pub mod trace;
 pub mod utils;
 pub mod wasm;
+pub mod audio;
 
 pub use app::NativeApp;
 pub use gpu::GpuContext;
 pub use wasm::WasmRuntime;
+pub use audio::{AudioEngine, SoundRegistry};

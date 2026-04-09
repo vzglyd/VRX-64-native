@@ -31,6 +31,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use vzglyd_kernel::manifest::{AssetRef, SlideManifest};
+use crate::audio::SoundRegistry;
 use crate::trace::{
     active_trace_recorder, parse_guest_trace_end_payload, parse_guest_trace_payload,
 };
@@ -60,6 +61,14 @@ struct HostMeshAssetCatalog {
 #[derive(Clone, Default)]
 struct HostSceneMetadataCatalog {
     encoded_by_key: Arc<HashMap<String, Vec<u8>>>,
+}
+
+#[derive(Clone, Default)]
+struct HostSoundCatalog {
+    /// Raw sound bytes keyed by asset key (e.g., "notify.mp3")
+    by_key: Arc<HashMap<String, Vec<u8>>>,
+    /// Active sound instances managed through rodio
+    registry: Arc<std::sync::Mutex<SoundRegistry>>,
 }
 
 struct SlideMailboxState {
@@ -112,6 +121,7 @@ struct SlideStore {
     label: String,
     mesh_assets: HostMeshAssetCatalog,
     scene_metadata: HostSceneMetadataCatalog,
+    sound_catalog: HostSoundCatalog,
     trace_recorder: Option<TraceRecorder>,
     trace_thread: String,
 }
@@ -2026,6 +2036,7 @@ fn empty_world_scene_spec() -> SlideSpec<WorldVertex> {
         font: None,
         textures_used: 0,
         textures: vec![],
+        sounds: vec![],
         static_meshes: vec![],
         dynamic_meshes: vec![],
         draws: vec![],
@@ -2179,6 +2190,56 @@ fn build_host_scene_metadata_catalog(
     })
 }
 
+fn build_host_sound_catalog(
+    manifest: &SlideManifest,
+    package_root: &Path,
+) -> Result<HostSoundCatalog, LoadError> {
+    let Some(assets) = manifest.assets.as_ref() else {
+        return Ok(HostSoundCatalog {
+            by_key: Arc::new(HashMap::new()),
+            registry: Arc::new(std::sync::Mutex::new(SoundRegistry::new())),
+        });
+    };
+    if assets.sounds.is_empty() {
+        return Ok(HostSoundCatalog {
+            by_key: Arc::new(HashMap::new()),
+            registry: Arc::new(std::sync::Mutex::new(SoundRegistry::new())),
+        });
+    }
+
+    let loader = AssetLoader::new(package_root)?;
+    let mut by_key = HashMap::with_capacity(assets.sounds.len());
+    for sound_ref in &assets.sounds {
+        let resolved = loader.resolve(&sound_ref.path)?;
+        let runtime_key = sound_ref
+            .id
+            .clone()
+            .or_else(|| sound_ref.label.clone())
+            .or_else(|| {
+                resolved
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| sound_ref.path.clone());
+        let data = std::fs::read(&resolved).map_err(|error| {
+            LoadError::AssetLoad(format!(
+                "failed to read sound asset '{}': {error}",
+                resolved.display()
+            ))
+        })?;
+        if by_key.insert(runtime_key.clone(), data).is_some() {
+            return Err(LoadError::AssetLoad(format!(
+                "sound asset key '{runtime_key}' is declared more than once"
+            )));
+        }
+    }
+    Ok(HostSoundCatalog {
+        by_key: Arc::new(by_key),
+        registry: Arc::new(std::sync::Mutex::new(SoundRegistry::new())),
+    })
+}
+
 fn mesh_runtime_key(asset_ref: &AssetRef, resolved: &Path) -> String {
     asset_ref
         .id
@@ -2239,6 +2300,10 @@ where
         "test-slide",
         HostMeshAssetCatalog::default(),
         HostSceneMetadataCatalog::default(),
+        HostSoundCatalog {
+            by_key: Arc::new(HashMap::new()),
+            registry: Arc::new(std::sync::Mutex::new(SoundRegistry::new())),
+        },
         None,
     )?;
     Ok(loaded)
@@ -2276,6 +2341,7 @@ where
         .map_err(|e| LoadError::WasmLoad(e.to_string()))?;
     let host_mesh_assets = build_host_mesh_asset_catalog(&manifest, &entry.package_root)?;
     let host_scene_metadata = build_host_scene_metadata_catalog(&manifest, &entry.package_root)?;
+    let host_sounds = build_host_sound_catalog(&manifest, &entry.package_root)?;
 
     let slide_runtime_label = entry.wasm_path.display().to_string();
     let (mut loaded, channel) = load_slide(
@@ -2284,6 +2350,7 @@ where
         &slide_runtime_label,
         host_mesh_assets,
         host_scene_metadata,
+        host_sounds,
         params_bytes,
     )?;
     let screen_background_scene = if loaded.spec.scene_space == SceneSpace::Screen2D {
@@ -2566,6 +2633,12 @@ fn collect_pack_files(
             files.insert(
                 PathBuf::from(&scene.path),
                 asset_loader.resolve(&scene.path)?,
+            );
+        }
+        for sound in &assets.sounds {
+            files.insert(
+                PathBuf::from(&sound.path),
+                asset_loader.resolve(&sound.path)?,
             );
         }
     }
@@ -3111,6 +3184,7 @@ fn load_slide<V>(
     runtime_label: &str,
     mesh_assets: HostMeshAssetCatalog,
     scene_metadata: HostSceneMetadataCatalog,
+    sound_catalog: HostSoundCatalog,
     params_bytes: Option<&[u8]>,
 ) -> Result<(LoadedSpec<V>, SlideChannel), LoadError>
 where
@@ -3130,6 +3204,7 @@ where
             label: runtime_label.to_string(),
             mesh_assets,
             scene_metadata,
+            sound_catalog,
             trace_recorder: active_trace_recorder(),
             trace_thread: format!("slide:{runtime_label}"),
         },
@@ -3183,6 +3258,166 @@ where
             "trace_event",
             |mut caller: wasmtime::Caller<'_, SlideStore>, ptr: i32, len: i32| -> i32 {
                 host_trace_event(&mut caller, ptr, len)
+            },
+        )
+        .map_err(|e| LoadError::WasmLoad(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vzglyd_host",
+            "audio_play",
+            |mut caller: wasmtime::Caller<'_, SlideStore>,
+             id: i32,
+             key_ptr: i32,
+             key_len: i32,
+             volume: f32,
+             looped: i32|
+             -> i32 {
+                if key_ptr < 0 || key_len < 0 {
+                    return HOST_ERROR;
+                }
+                let Ok(key) = read_host_string(&mut caller, key_ptr, key_len) else {
+                    return HOST_ERROR;
+                };
+                let catalog = &caller.data().sound_catalog;
+                let Some(data) = catalog.by_key.get(&key) else {
+                    log::warn!("slide:{} audio_play: sound key '{}' not found", caller.data().label, key);
+                    return HOST_ASSET_NOT_FOUND;
+                };
+                let data = data.clone();
+                let id = id as u32;
+                let looped = looped != 0;
+
+                let result = if let Ok(mut registry) = catalog.registry.lock() {
+                    registry.play(id, &data, volume, looped)
+                } else {
+                    log::error!("slide:{} audio_play: failed to lock sound registry", caller.data().label);
+                    Err(crate::audio::AudioError::PlayError("registry lock failed".into()))
+                };
+
+                if let Err(ref e) = result {
+                    log::error!("slide:{} audio_play: {e}", caller.data().label);
+                    return HOST_ERROR;
+                }
+
+                log::info!(
+                    "slide:{} audio_play id={} key='{}' vol={:.2} looped={}",
+                    caller.data().label,
+                    id,
+                    key,
+                    volume,
+                    looped
+                );
+                if let Some(recorder) = caller.data().trace_recorder.clone() {
+                    recorder.instant(
+                        caller.data().trace_thread.clone(),
+                        "audio",
+                        "audio_play",
+                        BTreeMap::from([
+                            ("id".to_string(), id.to_string()),
+                            ("key".to_string(), key.clone()),
+                            ("volume".to_string(), format!("{:.2}", volume)),
+                            ("looped".to_string(), looped.to_string()),
+                        ]),
+                    );
+                }
+                WASI_ERRNO_SUCCESS
+            },
+        )
+        .map_err(|e| LoadError::WasmLoad(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vzglyd_host",
+            "audio_stop",
+            |caller: wasmtime::Caller<'_, SlideStore>, id: i32| -> i32 {
+                let catalog = &caller.data().sound_catalog;
+                if let Ok(mut registry) = catalog.registry.lock() {
+                    match registry.stop(id as u32) {
+                        Ok(()) => {
+                            log::info!("slide:{} audio_stop id={}", caller.data().label, id);
+                            WASI_ERRNO_SUCCESS
+                        }
+                        Err(e) => {
+                            log::warn!("slide:{} audio_stop: {e}", caller.data().label);
+                            HOST_ERROR
+                        }
+                    }
+                } else {
+                    HOST_ERROR
+                }
+            },
+        )
+        .map_err(|e| LoadError::WasmLoad(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vzglyd_host",
+            "audio_set_volume",
+            |caller: wasmtime::Caller<'_, SlideStore>, id: i32, volume: f32| -> i32 {
+                let catalog = &caller.data().sound_catalog;
+                if let Ok(mut registry) = catalog.registry.lock() {
+                    match registry.set_volume(id as u32, volume) {
+                        Ok(()) => {
+                            log::info!(
+                                "slide:{} audio_set_volume id={} vol={:.2}",
+                                caller.data().label,
+                                id,
+                                volume
+                            );
+                            WASI_ERRNO_SUCCESS
+                        }
+                        Err(e) => {
+                            log::warn!("slide:{} audio_set_volume: {e}", caller.data().label);
+                            HOST_ERROR
+                        }
+                    }
+                } else {
+                    HOST_ERROR
+                }
+            },
+        )
+        .map_err(|e| LoadError::WasmLoad(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vzglyd_host",
+            "audio_pause",
+            |caller: wasmtime::Caller<'_, SlideStore>, id: i32| -> i32 {
+                let catalog = &caller.data().sound_catalog;
+                if let Ok(mut registry) = catalog.registry.lock() {
+                    match registry.pause(id as u32) {
+                        Ok(()) => {
+                            log::info!("slide:{} audio_pause id={}", caller.data().label, id);
+                            WASI_ERRNO_SUCCESS
+                        }
+                        Err(e) => {
+                            log::warn!("slide:{} audio_pause: {e}", caller.data().label);
+                            HOST_ERROR
+                        }
+                    }
+                } else {
+                    HOST_ERROR
+                }
+            },
+        )
+        .map_err(|e| LoadError::WasmLoad(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vzglyd_host",
+            "audio_resume",
+            |caller: wasmtime::Caller<'_, SlideStore>, id: i32| -> i32 {
+                let catalog = &caller.data().sound_catalog;
+                if let Ok(mut registry) = catalog.registry.lock() {
+                    match registry.resume(id as u32) {
+                        Ok(()) => {
+                            log::info!("slide:{} audio_resume id={}", caller.data().label, id);
+                            WASI_ERRNO_SUCCESS
+                        }
+                        Err(e) => {
+                            log::warn!("slide:{} audio_resume: {e}", caller.data().label);
+                            HOST_ERROR
+                        }
+                    }
+                } else {
+                    HOST_ERROR
+                }
             },
         )
         .map_err(|e| LoadError::WasmLoad(e.to_string()))?;
@@ -3497,6 +3732,7 @@ mod tests {
             font: None,
             textures_used: 0,
             textures: vec![],
+            sounds: vec![],
             static_meshes: vec![],
             dynamic_meshes: vec![],
             draws: vec![],
@@ -3542,6 +3778,7 @@ mod tests {
             font: None,
             textures_used: 0,
             textures: vec![],
+            sounds: vec![],
             static_meshes: vec![mesh0.clone(), mesh1.clone()],
             dynamic_meshes: vec![],
             draws: vec![
@@ -4992,5 +5229,411 @@ cp built/slide.wasm slide.wasm
             error.to_string().contains("unsafe entry path"),
             "unexpected error: {error}"
         );
+    }
+
+    // ── Audio helper: generate a minimal valid WAV file ─────────────────
+
+    fn make_test_wav_bytes() -> Vec<u8> {
+        let sample_rate: u32 = 44_100;
+        let num_channels: u16 = 1;
+        let bits_per_sample: u16 = 16;
+        let num_samples = sample_rate as usize / 10; // 100ms
+        let byte_rate = sample_rate * num_channels as u32 * bits_per_sample as u32 / 8;
+        let block_align: u16 = num_channels * bits_per_sample / 8;
+        let data_size = num_samples * num_channels as usize * (bits_per_sample as usize / 8);
+        let chunk_size: u32 = 36 + data_size as u32;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&chunk_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&num_channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&(data_size as u32).to_le_bytes());
+        buf.resize(44 + data_size, 0u8);
+        buf
+    }
+
+    // ── Audio catalog tests ─────────────────────────────────────────────
+
+    #[test]
+    fn build_host_sound_catalog_empty_when_no_sounds_in_manifest() {
+        let manifest = SlideManifest {
+            name: Some("test".into()),
+            version: None,
+            author: None,
+            description: None,
+            abi_version: Some(2),
+            scene_space: None,
+            assets: Some(vzglyd_kernel::manifest::ManifestAssets {
+                textures: vec![],
+                meshes: vec![],
+                scenes: vec![],
+                sounds: vec![],
+            }),
+            shaders: None,
+            display: None,
+            requirements: None,
+            sidecar: None,
+            params: None,
+        };
+        let dir = temp_package_dir("sound_empty_catalog");
+        let catalog = build_host_sound_catalog(&manifest, &dir).expect("catalog should succeed");
+        assert!(catalog.by_key.is_empty());
+    }
+
+    #[test]
+    fn build_host_sound_catalog_empty_when_no_assets_section() {
+        let manifest = SlideManifest {
+            name: Some("test".into()),
+            version: None,
+            author: None,
+            description: None,
+            abi_version: Some(2),
+            scene_space: None,
+            assets: None,
+            shaders: None,
+            display: None,
+            requirements: None,
+            sidecar: None,
+            params: None,
+        };
+        let dir = temp_package_dir("sound_no_assets");
+        let catalog = build_host_sound_catalog(&manifest, &dir).expect("catalog should succeed");
+        assert!(catalog.by_key.is_empty());
+    }
+
+    #[test]
+    fn build_host_sound_catalog_loads_wav_file() {
+        let wav = make_test_wav_bytes();
+        let package_dir = temp_package_dir("sound_wav");
+        let assets_dir = package_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).expect("create assets dir");
+        std::fs::write(assets_dir.join("click.wav"), &wav).expect("write wav");
+
+        let manifest = SlideManifest {
+            name: Some("test".into()),
+            version: None,
+            author: None,
+            description: None,
+            abi_version: Some(2),
+            scene_space: None,
+            assets: Some(vzglyd_kernel::manifest::ManifestAssets {
+                textures: vec![],
+                meshes: vec![],
+                scenes: vec![],
+                sounds: vec![vzglyd_kernel::manifest::SoundAssetRef {
+                    path: "assets/click.wav".into(),
+                    format: None,
+                    label: None,
+                    id: Some("click_sound".into()),
+                }],
+            }),
+            shaders: None,
+            display: None,
+            requirements: None,
+            sidecar: None,
+            params: None,
+        };
+
+        let catalog = build_host_sound_catalog(&manifest, &package_dir)
+            .expect("catalog should load wav");
+        assert_eq!(catalog.by_key.len(), 1);
+        assert!(catalog.by_key.contains_key("click_sound"));
+        assert_eq!(catalog.by_key["click_sound"], wav);
+    }
+
+    #[test]
+    fn build_host_sound_catalog_uses_filename_as_fallback_key() {
+        let wav = make_test_wav_bytes();
+        let package_dir = temp_package_dir("sound_fallback_key");
+        let assets_dir = package_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).expect("create assets dir");
+        std::fs::write(assets_dir.join("notify.wav"), &wav).expect("write wav");
+
+        let manifest = SlideManifest {
+            name: Some("test".into()),
+            version: None,
+            author: None,
+            description: None,
+            abi_version: Some(2),
+            scene_space: None,
+            assets: Some(vzglyd_kernel::manifest::ManifestAssets {
+                textures: vec![],
+                meshes: vec![],
+                scenes: vec![],
+                sounds: vec![vzglyd_kernel::manifest::SoundAssetRef {
+                    path: "assets/notify.wav".into(),
+                    format: None,
+                    label: None,
+                    id: None,
+                }],
+            }),
+            shaders: None,
+            display: None,
+            requirements: None,
+            sidecar: None,
+            params: None,
+        };
+
+        let catalog = build_host_sound_catalog(&manifest, &package_dir)
+            .expect("catalog should use filename as key");
+        assert!(catalog.by_key.contains_key("notify"));
+    }
+
+    #[test]
+    fn build_host_sound_catalog_uses_label_as_fallback_key() {
+        let wav = make_test_wav_bytes();
+        let package_dir = temp_package_dir("sound_label_key");
+        let assets_dir = package_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).expect("create assets dir");
+        std::fs::write(assets_dir.join("audio.wav"), &wav).expect("write wav");
+
+        let manifest = SlideManifest {
+            name: Some("test".into()),
+            version: None,
+            author: None,
+            description: None,
+            abi_version: Some(2),
+            scene_space: None,
+            assets: Some(vzglyd_kernel::manifest::ManifestAssets {
+                textures: vec![],
+                meshes: vec![],
+                scenes: vec![],
+                sounds: vec![vzglyd_kernel::manifest::SoundAssetRef {
+                    path: "assets/audio.wav".into(),
+                    format: None,
+                    label: Some("my_label".into()),
+                    id: None,
+                }],
+            }),
+            shaders: None,
+            display: None,
+            requirements: None,
+            sidecar: None,
+            params: None,
+        };
+
+        let catalog = build_host_sound_catalog(&manifest, &package_dir)
+            .expect("catalog should use label as key");
+        assert!(catalog.by_key.contains_key("my_label"));
+    }
+
+    #[test]
+    fn build_host_sound_catalog_errors_on_missing_file() {
+        let package_dir = temp_package_dir("sound_missing_file");
+
+        let manifest = SlideManifest {
+            name: Some("test".into()),
+            version: None,
+            author: None,
+            description: None,
+            abi_version: Some(2),
+            scene_space: None,
+            assets: Some(vzglyd_kernel::manifest::ManifestAssets {
+                textures: vec![],
+                meshes: vec![],
+                scenes: vec![],
+                sounds: vec![vzglyd_kernel::manifest::SoundAssetRef {
+                    path: "assets/nonexistent.wav".into(),
+                    format: None,
+                    label: None,
+                    id: Some("ghost".into()),
+                }],
+            }),
+            shaders: None,
+            display: None,
+            requirements: None,
+            sidecar: None,
+            params: None,
+        };
+
+        let result = build_host_sound_catalog(&manifest, &package_dir);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent.wav"));
+    }
+
+    #[test]
+    fn build_host_sound_catalog_errors_on_duplicate_key() {
+        let wav = make_test_wav_bytes();
+        let package_dir = temp_package_dir("sound_duplicate_key");
+        let assets_dir = package_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).expect("create assets dir");
+        std::fs::write(assets_dir.join("a.wav"), &wav).expect("write wav a");
+        std::fs::write(assets_dir.join("b.wav"), &wav).expect("write wav b");
+
+        let manifest = SlideManifest {
+            name: Some("test".into()),
+            version: None,
+            author: None,
+            description: None,
+            abi_version: Some(2),
+            scene_space: None,
+            assets: Some(vzglyd_kernel::manifest::ManifestAssets {
+                textures: vec![],
+                meshes: vec![],
+                scenes: vec![],
+                sounds: vec![
+                    vzglyd_kernel::manifest::SoundAssetRef {
+                        path: "assets/a.wav".into(),
+                        format: None,
+                        label: None,
+                        id: Some("same_key".into()),
+                    },
+                    vzglyd_kernel::manifest::SoundAssetRef {
+                        path: "assets/b.wav".into(),
+                        format: None,
+                        label: None,
+                        id: Some("same_key".into()),
+                    },
+                ],
+            }),
+            shaders: None,
+            display: None,
+            requirements: None,
+            sidecar: None,
+            params: None,
+        };
+
+        let result = build_host_sound_catalog(&manifest, &package_dir);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("same_key"));
+        assert!(err.contains("more than once"));
+    }
+
+    #[test]
+    fn build_host_sound_catalog_initialises_registry() {
+        let wav = make_test_wav_bytes();
+        let package_dir = temp_package_dir("sound_registry_init");
+        let assets_dir = package_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).expect("create assets dir");
+        std::fs::write(assets_dir.join("tone.wav"), &wav).expect("write wav");
+
+        let manifest = SlideManifest {
+            name: Some("test".into()),
+            version: None,
+            author: None,
+            description: None,
+            abi_version: Some(2),
+            scene_space: None,
+            assets: Some(vzglyd_kernel::manifest::ManifestAssets {
+                textures: vec![],
+                meshes: vec![],
+                scenes: vec![],
+                sounds: vec![vzglyd_kernel::manifest::SoundAssetRef {
+                    path: "assets/tone.wav".into(),
+                    format: None,
+                    label: None,
+                    id: Some("tone".into()),
+                }],
+            }),
+            shaders: None,
+            display: None,
+            requirements: None,
+            sidecar: None,
+            params: None,
+        };
+
+        let catalog = build_host_sound_catalog(&manifest, &package_dir)
+            .expect("catalog should succeed");
+        assert!(catalog.by_key.contains_key("tone"));
+        // Registry should be initialised and empty
+        let registry = catalog.registry.lock().expect("lock registry");
+        assert!(registry.is_empty());
+    }
+
+    // ── Audio integration: full package with sound ──────────────────────
+
+    #[test]
+    fn load_slide_from_wasm_with_sound_asset() {
+        let wav = make_test_wav_bytes();
+        let package_dir = temp_package_dir("slide_with_sound");
+        let assets_dir = package_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).expect("create assets dir");
+        std::fs::write(assets_dir.join("tone.wav"), &wav).expect("write wav");
+
+        // Create a minimal WASM module that provides the ABI
+        let spec = make_scene_compile_base_spec(Limits::pi4());
+        let wasm = make_spec_wasm_bytes(&make_spec_wire_bytes(&spec));
+
+        let manifest_json = r#"{
+            "name":"Sound Test",
+            "abi_version":2,
+            "scene_space":"world_3d",
+            "assets":{
+                "sounds":[
+                    {"id":"tone","path":"assets/tone.wav"}
+                ]
+            }
+        }"#;
+
+        std::fs::write(package_dir.join(PACKAGE_MANIFEST_NAME), manifest_json)
+            .expect("write manifest");
+        std::fs::write(package_dir.join(PACKAGE_WASM_NAME), &wasm).expect("write wasm");
+
+        let (loaded, _manifest) = load_slide_from_wasm::<WorldVertex>(
+            package_dir.to_string_lossy().as_ref(),
+            None,
+            &[],
+        )
+        .expect("load slide with sound");
+
+        // The loaded slide store should have the sound asset
+        let catalog = &loaded.runtime.as_ref().unwrap().store.data().sound_catalog;
+        assert!(catalog.by_key.contains_key("tone"), "sound 'tone' should be in catalog");
+        assert_eq!(catalog.by_key["tone"], wav, "sound data should match original WAV");
+    }
+
+    #[test]
+    fn load_slide_with_multiple_sound_assets() {
+        let wav1 = make_test_wav_bytes();
+        let wav2 = make_test_wav_bytes();
+        let package_dir = temp_package_dir("slide_multi_sound");
+        let assets_dir = package_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).expect("create assets dir");
+        std::fs::write(assets_dir.join("click.wav"), &wav1).expect("write click wav");
+        std::fs::write(assets_dir.join("pop.wav"), &wav2).expect("write pop wav");
+
+        let spec = make_scene_compile_base_spec(Limits::pi4());
+        let wasm = make_spec_wasm_bytes(&make_spec_wire_bytes(&spec));
+
+        let manifest_json = r#"{
+            "name":"Multi Sound Test",
+            "abi_version":2,
+            "scene_space":"world_3d",
+            "assets":{
+                "sounds":[
+                    {"id":"click","path":"assets/click.wav"},
+                    {"id":"pop","path":"assets/pop.wav"}
+                ]
+            }
+        }"#;
+
+        std::fs::write(package_dir.join(PACKAGE_MANIFEST_NAME), manifest_json)
+            .expect("write manifest");
+        std::fs::write(package_dir.join(PACKAGE_WASM_NAME), &wasm).expect("write wasm");
+
+        let (loaded, _manifest) = load_slide_from_wasm::<WorldVertex>(
+            package_dir.to_string_lossy().as_ref(),
+            None,
+            &[],
+        )
+        .expect("load slide with multiple sounds");
+
+        let catalog = &loaded.runtime.as_ref().unwrap().store.data().sound_catalog;
+        assert_eq!(catalog.by_key.len(), 2);
+        assert!(catalog.by_key.contains_key("click"));
+        assert!(catalog.by_key.contains_key("pop"));
+        assert_eq!(catalog.by_key["click"], wav1);
+        assert_eq!(catalog.by_key["pop"], wav2);
     }
 }

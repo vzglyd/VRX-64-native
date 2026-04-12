@@ -158,11 +158,14 @@ impl GpuContext {
         // the selected adapter's supported limits like `lume` does.
         let required_limits = adapter.limits();
 
+        // PUSH_CONSTANTS is required for World3D slide shaders (var<push_constant> vzglyd_push).
+        let required_features = wgpu::Features::PUSH_CONSTANTS;
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("vzglyd device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits,
                     memory_hints: wgpu::MemoryHints::Performance,
                 },

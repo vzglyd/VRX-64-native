@@ -289,11 +289,11 @@ pub struct PackReport {
     pub archive_bytes: u64,
 }
 
-pub(crate) struct LoadedSpec<V: bytemuck::Pod> {
+pub struct LoadedSpec<V: bytemuck::Pod> {
     pub spec: SlideSpec<V>,
-    pub runtime: Option<SlideRuntime>,
-    pub shader_source_hint: Option<ShaderSourceHint>,
-    pub screen_background_scene: Option<ScreenBackgroundScene>,
+    pub(crate) runtime: Option<SlideRuntime>,
+    pub(crate) shader_source_hint: Option<ShaderSourceHint>,
+    pub(crate) screen_background_scene: Option<ScreenBackgroundScene>,
 }
 
 pub(crate) struct SlideRuntime {
@@ -2377,10 +2377,9 @@ pub fn make_spec_wasm_bytes(spec_bytes: &[u8]) -> Vec<u8> {
 
 /// Load a slide spec from raw WASM bytes (e.g. embedded via `include_bytes!`).
 /// No manifest is returned — suitable for built-in bundled slides.
-#[cfg(test)]
 pub fn load_slide_from_wasm_bytes<V>(wasm_bytes: &[u8]) -> Result<LoadedSpec<V>, LoadError>
 where
-    V: PackageMeshVertex,
+    V: Serialize + DeserializeOwned + bytemuck::Pod,
 {
     let engine = make_wasm_engine()?;
     let module =
@@ -3292,7 +3291,7 @@ fn load_slide<V>(
     params_bytes: Option<&[u8]>,
 ) -> Result<(LoadedSpec<V>, SlideChannel), LoadError>
 where
-    V: PackageMeshVertex,
+    V: Serialize + DeserializeOwned + bytemuck::Pod,
 {
     let mut wasi_builder = wasmtime_wasi::sync::WasiCtxBuilder::new();
     if log::log_enabled!(log::Level::Info) {
@@ -3562,7 +3561,7 @@ fn extract_spec<V>(
     params_bytes: Option<&[u8]>,
 ) -> Result<LoadedSpec<V>, LoadError>
 where
-    V: PackageMeshVertex,
+    V: Serialize + DeserializeOwned + bytemuck::Pod,
 {
     let spec = decode_spec(&mut store, instance, params_bytes)?;
     log::info!("slide:{} decoded immutable spec", store.data().label);
@@ -3622,7 +3621,7 @@ fn decode_spec<V>(
     params_bytes: Option<&[u8]>,
 ) -> Result<SlideSpec<V>, LoadError>
 where
-    V: PackageMeshVertex,
+    V: Serialize + DeserializeOwned + bytemuck::Pod,
 {
     let abi_fn = instance
         .get_typed_func::<(), u32>(&mut *store, "vzglyd_abi_version")

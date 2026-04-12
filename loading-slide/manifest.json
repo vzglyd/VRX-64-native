@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "author": "LUME",
   "description": "Loading screen slide compiled from Rust to wasm32-wasip1",
+  "abi_version": 3,
   "assets": {
     "art": {
       "j_card": { "path": "art/j-card.svg", "label": "Loading J-card" },

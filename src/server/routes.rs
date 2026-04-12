@@ -21,6 +21,8 @@ use super::state::ServerState;
 // ── Embedded static assets ────────────────────────────────────────────────────
 
 const MANAGEMENT_HTML: &str = include_str!("../ui/management.html");
+const MANAGEMENT_JS: &str = include_str!("../ui/dist/management.js");
+const MANAGEMENT_CSS: &str = include_str!("../ui/dist/management.css");
 
 // ── Static asset routes ───────────────────────────────────────────────────────
 
@@ -29,6 +31,25 @@ pub async fn get_index() -> impl IntoResponse {
     Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(Body::from(MANAGEMENT_HTML))
+        .unwrap()
+}
+
+/// Serve the compiled React management UI JavaScript.
+pub async fn get_management_js() -> impl IntoResponse {
+    Response::builder()
+        .header(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )
+        .body(Body::from(MANAGEMENT_JS))
+        .unwrap()
+}
+
+/// Serve the compiled React management UI stylesheet.
+pub async fn get_management_css() -> impl IntoResponse {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/css; charset=utf-8")
+        .body(Body::from(MANAGEMENT_CSS))
         .unwrap()
 }
 
@@ -60,10 +81,7 @@ pub async fn get_playlist(State(state): State<ServerState>) -> impl IntoResponse
 }
 
 /// POST /api/playlist — validate and write playlist.json, then signal hot-reload.
-pub async fn post_playlist(
-    State(state): State<ServerState>,
-    body: String,
-) -> impl IntoResponse {
+pub async fn post_playlist(State(state): State<ServerState>, body: String) -> impl IntoResponse {
     // Validate with the kernel parser.
     if let Err(e) = parse_playlist(body.as_bytes()) {
         return (
@@ -136,12 +154,7 @@ fn list_slide_bundles(slides_dir: &Path) -> Result<Vec<SlideLibraryEntry>, Strin
     let rd = std::fs::read_dir(slides_dir).map_err(|e| format!("read dir: {e}"))?;
     let mut entries: Vec<SlideLibraryEntry> = rd
         .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                == Some("vzglyd")
-        })
+        .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("vzglyd"))
         .map(|e| {
             let path = e.path();
             let size_bytes = e.metadata().map(|m| m.len()).unwrap_or(0);
@@ -172,10 +185,7 @@ pub async fn upload_slide(
 
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("file") {
-            let raw_name = field
-                .file_name()
-                .unwrap_or("upload.vzglyd")
-                .to_string();
+            let raw_name = field.file_name().unwrap_or("upload.vzglyd").to_string();
             // Sanitize filename — strip any path components.
             let safe_name = std::path::Path::new(&raw_name)
                 .file_name()
@@ -255,18 +265,14 @@ pub async fn get_slide_manifest(
     }
 
     let full_path = state.slides_dir.join(&bundle_path);
-    let result = tokio::task::spawn_blocking(move || {
-        extract_manifest_from_archive(&full_path)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || extract_manifest_from_archive(&full_path)).await;
 
     match result {
         Ok(Ok(manifest)) => (StatusCode::OK, Json(manifest)).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Ok(Err(e)) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("task error: {e}")})),
@@ -329,10 +335,8 @@ pub async fn get_slide_art(
     }
 
     let full_path = state.slides_dir.join(&bundle_path);
-    let result = tokio::task::spawn_blocking(move || {
-        extract_art_from_archive(&full_path, &kind)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || extract_art_from_archive(&full_path, &kind)).await;
 
     match result {
         Ok(Ok((content_type, bytes))) => Response::builder()
@@ -340,11 +344,9 @@ pub async fn get_slide_art(
             .body(Body::from(bytes))
             .unwrap()
             .into_response(),
-        Ok(Err(e)) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Ok(Err(e)) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("task error: {e}")})),
@@ -408,15 +410,12 @@ pub async fn post_secrets(
     }
 
     // Persist to disk.
-    let secrets_snapshot = state
-        .secrets
-        .read()
-        .map(|s| s.clone())
-        .unwrap_or_default();
+    let secrets_snapshot = state.secrets.read().map(|s| s.clone()).unwrap_or_default();
     let slides_dir = state.slides_dir.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || save_secrets(&slides_dir, &secrets_snapshot))
-        .await
-        .unwrap_or_else(|e| Err(format!("task error: {e}")))
+    if let Err(e) =
+        tokio::task::spawn_blocking(move || save_secrets(&slides_dir, &secrets_snapshot))
+            .await
+            .unwrap_or_else(|e| Err(format!("task error: {e}")))
     {
         log::warn!("failed to persist secrets: {e}");
     }
@@ -488,7 +487,9 @@ fn validate_bundle_path(path: &str) -> Result<(), String> {
             std::path::Component::Prefix(_)
             | std::path::Component::RootDir
             | std::path::Component::ParentDir => {
-                return Err(format!("path '{path}' attempts to escape the slides directory"));
+                return Err(format!(
+                    "path '{path}' attempts to escape the slides directory"
+                ));
             }
             _ => {}
         }
@@ -505,10 +506,9 @@ fn validate_art_kind(kind: &str) -> Result<(), String> {
 
 /// Extract and parse `manifest.json` from a `.vzglyd` ZIP archive.
 fn extract_manifest_from_archive(path: &std::path::Path) -> Result<SlideManifest, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("open '{}': {e}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| format!("read zip '{}': {e}", path.display()))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("open '{}': {e}", path.display()))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| format!("read zip '{}': {e}", path.display()))?;
 
     // Look for manifest.json at root or any path ending with manifest.json.
     let manifest_idx = (0..zip.len()).find(|&i| {
@@ -521,13 +521,12 @@ fn extract_manifest_from_archive(path: &std::path::Path) -> Result<SlideManifest
     });
 
     let Some(idx) = manifest_idx else {
-        return Err(format!(
-            "manifest.json not found in '{}'",
-            path.display()
-        ));
+        return Err(format!("manifest.json not found in '{}'", path.display()));
     };
 
-    let mut entry = zip.by_index(idx).map_err(|e| format!("read manifest entry: {e}"))?;
+    let mut entry = zip
+        .by_index(idx)
+        .map_err(|e| format!("read manifest entry: {e}"))?;
     let mut content = String::new();
     entry
         .read_to_string(&mut content)
@@ -545,10 +544,9 @@ fn extract_art_from_archive(path: &Path, kind: &str) -> Result<(&'static str, Ve
     let manifest = extract_manifest_from_archive(path)?;
     let art_path = cassette_art_path(&manifest, kind)?;
 
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("open '{}': {e}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| format!("read zip '{}': {e}", path.display()))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("open '{}': {e}", path.display()))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| format!("read zip '{}': {e}", path.display()))?;
     let mut entry = zip.by_name(art_path).map_err(|e| {
         format!(
             "art asset '{art_path}' not found in '{}': {e}",

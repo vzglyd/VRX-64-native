@@ -44,8 +44,7 @@ pub fn start_server(
     slides_dir: std::path::PathBuf,
     secrets: Arc<RwLock<SecretsStore>>,
 ) -> (ServerHandle, Receiver<String>, Arc<RwLock<AppStatus>>) {
-    let (playlist_tx, playlist_rx): (SyncSender<String>, Receiver<String>) =
-        mpsc::sync_channel(1);
+    let (playlist_tx, playlist_rx): (SyncSender<String>, Receiver<String>) = mpsc::sync_channel(1);
     let app_status: Arc<RwLock<AppStatus>> = Arc::new(RwLock::new(AppStatus::default()));
     let app_status_clone = Arc::clone(&app_status);
 
@@ -74,6 +73,8 @@ pub fn start_server(
                 let app = Router::new()
                     // Static assets
                     .route("/", get(routes::get_index))
+                    .route("/assets/management.js", get(routes::get_management_js))
+                    .route("/assets/management.css", get(routes::get_management_css))
                     // Playlist
                     .route("/api/playlist", get(routes::get_playlist))
                     .route("/api/playlist", post(routes::post_playlist))
@@ -84,14 +85,8 @@ pub fn start_server(
                         "/api/slides/:path/manifest",
                         get(routes::get_slide_manifest),
                     )
-                    .route(
-                        "/api/slides/:path/bundle",
-                        get(routes::get_slide_bundle),
-                    )
-                    .route(
-                        "/api/slides/:path/art/:kind",
-                        get(routes::get_slide_art),
-                    )
+                    .route("/api/slides/:path/bundle", get(routes::get_slide_bundle))
+                    .route("/api/slides/:path/art/:kind", get(routes::get_slide_art))
                     // Secrets
                     .route("/api/secrets", get(routes::get_secrets))
                     .route("/api/secrets", post(routes::post_secrets))

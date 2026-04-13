@@ -218,7 +218,15 @@ pub(crate) enum ShaderSourceHint {
 
 pub(crate) struct ScreenBackgroundScene {
     pub spec: SlideSpec<WorldVertex>,
+    pub scene_meshes: Vec<NativeSceneMesh>,
     pub shader_source_hint: Option<ShaderSourceHint>,
+}
+
+/// Native scene mesh with u32 indices, bypassing the slide crate's u16 limitation.
+pub(crate) struct NativeSceneMesh {
+    pub label: String,
+    pub vertices: Vec<WorldVertex>,
+    pub indices: Vec<u32>,
 }
 
 pub(crate) trait PackageMeshVertex: Serialize + DeserializeOwned + bytemuck::Pod {
@@ -294,6 +302,7 @@ pub struct LoadedSpec<V: bytemuck::Pod> {
     pub(crate) runtime: Option<SlideRuntime>,
     pub(crate) shader_source_hint: Option<ShaderSourceHint>,
     pub(crate) screen_background_scene: Option<ScreenBackgroundScene>,
+    pub(crate) scene_meshes: Vec<NativeSceneMesh>,
 }
 
 pub(crate) struct SlideRuntime {
@@ -1937,7 +1946,7 @@ fn compile_scene_lighting(
 fn compile_authored_scene_into_spec<V>(
     spec: &mut SlideSpec<V>,
     scene: &ImportedScene,
-) -> Result<(), LoadError>
+) -> Result<Vec<NativeSceneMesh>, LoadError>
 where
     V: PackageMeshVertex,
 {
@@ -1971,6 +1980,7 @@ where
         )));
     }
 
+    let mut scene_meshes = Vec::with_capacity(visible_mesh_nodes.len());
     let mut static_meshes = Vec::with_capacity(visible_mesh_nodes.len());
     let mut opaque_draws = Vec::new();
     let mut transparent_draws = Vec::new();
@@ -1978,21 +1988,41 @@ where
         let material_class = resolve_scene_material_class(mesh_node);
         let pipeline = resolve_scene_pipeline(&scene.id, mesh_node, material_class);
         let mesh_index = static_meshes.len();
-        let indices: Vec<u16> = mesh_node
-            .indices
+        // Store u32 indices in native scene mesh; the spec's StaticMesh gets a placeholder.
+        let indices_u32: Vec<u32> = mesh_node.indices.iter().copied().collect();
+        let index_count = indices_u32.len() as u32;
+        let vertices: Vec<V> = mesh_node
+            .vertices
             .iter()
-            .map(|&idx| u16::try_from(idx).expect("scene mesh index exceeds u16"))
+            .copied()
+            .map(|imported| V::from_scene_import(imported, material_class, fallback_vertex))
             .collect();
-        let index_count = indices.len() as u32;
-        static_meshes.push(StaticMesh {
+
+        scene_meshes.push(NativeSceneMesh {
             label: mesh_node.label.clone(),
             vertices: mesh_node
                 .vertices
                 .iter()
                 .copied()
-                .map(|imported| V::from_scene_import(imported, material_class, fallback_vertex))
+                .map(|imported| {
+                    V::from_scene_import(imported, material_class, fallback_vertex)
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|v| {
+                    // V is WorldVertex in the authored scene path
+                    let bytes = postcard::to_stdvec(&v).expect("vertex serialize");
+                    postcard::from_bytes::<WorldVertex>(&bytes).expect("vertex deserialize")
+                })
                 .collect(),
-            indices,
+            indices: indices_u32,
+        });
+
+        // Placeholder for the spec (u16 indices, never rendered)
+        static_meshes.push(StaticMesh {
+            label: mesh_node.label.clone(),
+            vertices,
+            indices: vec![],
         });
         let draw = DrawSpec {
             label: mesh_node.label.clone(),
@@ -2032,7 +2062,7 @@ where
     spec.lighting = compile_scene_lighting(scene, spec.lighting.as_ref());
     ensure_compiled_scene_textures(spec);
     spec.animations = convert_scene_animations(scene, &visible_mesh_nodes);
-    Ok(())
+    Ok(scene_meshes)
 }
 
 /// Convert imported GLB animation clips into slide ABI `AnimationClip` types.
@@ -2091,7 +2121,7 @@ fn maybe_compile_authored_scene<V>(
     spec: &mut SlideSpec<V>,
     manifest: &SlideManifest,
     package_root: &Path,
-) -> Result<bool, LoadError>
+) -> Result<Vec<NativeSceneMesh>, LoadError>
 where
     V: PackageMeshVertex,
 {
@@ -2100,7 +2130,7 @@ where
         .as_ref()
         .is_some_and(|assets| !assets.scenes.is_empty());
     if !has_scene_assets {
-        return Ok(false);
+        return Ok(Vec::new());
     }
     if manifest.scene_space.as_deref() == Some("screen_2d") {
         return Err(LoadError::AssetLoad(
@@ -2128,8 +2158,7 @@ where
         log::warn!("scene '{}': {}", scene.id, warning);
     }
 
-    compile_authored_scene_into_spec(spec, &scene)?;
-    Ok(true)
+    compile_authored_scene_into_spec(spec, &scene)
 }
 
 fn empty_world_scene_spec() -> SlideSpec<WorldVertex> {
@@ -2171,10 +2200,11 @@ fn maybe_compile_screen_background_scene(
             )
         })?;
     let mut spec = empty_world_scene_spec();
-    compile_authored_scene_into_spec(&mut spec, &scene)?;
+    let scene_meshes = compile_authored_scene_into_spec(&mut spec, &scene)?;
 
     Ok(Some(ScreenBackgroundScene {
         spec,
+        scene_meshes,
         shader_source_hint: Some(ShaderSourceHint::DefaultWorldScene),
     }))
 }
@@ -2481,11 +2511,13 @@ where
     } else {
         None
     };
-    let scene_compiled = if loaded.spec.scene_space == SceneSpace::Screen2D {
-        false
+    let scene_meshes = if loaded.spec.scene_space == SceneSpace::Screen2D {
+        Vec::new()
     } else {
         maybe_compile_authored_scene(&mut loaded.spec, &manifest, &entry.package_root)?
     };
+    let scene_compiled = !scene_meshes.is_empty();
+    loaded.scene_meshes = scene_meshes;
     apply_package_resource_overrides(
         &mut loaded.spec,
         &manifest,
@@ -3643,6 +3675,7 @@ where
         )),
         shader_source_hint: None,
         screen_background_scene: None,
+        scene_meshes: Vec::new(),
     })
 }
 

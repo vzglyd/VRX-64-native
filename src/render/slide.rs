@@ -118,6 +118,7 @@ pub struct LoadedScreenSlide {
 
 pub struct LoadedWorldSlide {
     pub spec: SlideSpec<WorldVertex>,
+    pub scene_meshes: Vec<slide_loader::NativeSceneMesh>,
     pub(crate) runtime: Option<slide_loader::SlideRuntime>,
     pub(crate) shader_source_hint: Option<slide_loader::ShaderSourceHint>,
 }
@@ -316,6 +317,7 @@ impl ScreenSlideRenderer {
                     ctx,
                     LoadedWorldSlide {
                         spec: scene.spec,
+                        scene_meshes: scene.scene_meshes,
                         runtime: None,
                         shader_source_hint: scene.shader_source_hint,
                     },
@@ -506,6 +508,7 @@ impl WorldSlideRenderer {
             ctx,
             LoadedWorldSlide {
                 spec,
+                scene_meshes: Vec::new(),
                 runtime: None,
                 shader_source_hint: None,
             },
@@ -515,6 +518,7 @@ impl WorldSlideRenderer {
     fn from_loaded(ctx: &GpuContext, loaded: LoadedWorldSlide) -> Result<Self, String> {
         let LoadedWorldSlide {
             spec,
+            scene_meshes,
             runtime,
             shader_source_hint,
         } = loaded;
@@ -531,12 +535,17 @@ impl WorldSlideRenderer {
             )?);
         }
 
-        // Create static meshes
-        let static_meshes: Vec<MeshBuffers> = spec
+        // Create static meshes from spec
+        let mut static_meshes: Vec<MeshBuffers> = spec
             .static_meshes
             .iter()
             .map(|mesh| create_static_mesh_buffers(&ctx.device, mesh))
             .collect();
+
+        // Append native scene meshes (u32 indices for large meshes)
+        for scene_mesh in &scene_meshes {
+            static_meshes.push(create_scene_mesh_buffers(&ctx.device, &scene_mesh.vertices, &scene_mesh.indices));
+        }
 
         // Create dynamic mesh buffers
         let dynamic_meshes: Vec<DynamicMeshBuffers> = spec
@@ -1087,6 +1096,36 @@ fn create_static_mesh_buffers<V: Pod>(device: &wgpu::Device, mesh: &StaticMesh<V
         vertex_buffer: Arc::new(vertex_buffer),
         index_buffer: Arc::new(index_buffer),
         index_count: mesh.indices.len() as u32,
+    }
+}
+
+/// Creates scene mesh buffers with u32 indices for large meshes.
+fn create_scene_mesh_buffers<V: Pod>(device: &wgpu::Device, vertices: &[V], indices: &[u32]) -> MeshBuffers {
+    let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("scene_vertex_buffer"),
+        size: vertices.len() as u64 * std::mem::size_of::<V>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+    vertex_buffer.slice(..).get_mapped_range_mut()
+        [..vertices.len() * std::mem::size_of::<V>()]
+        .copy_from_slice(bytemuck::cast_slice(vertices));
+    vertex_buffer.unmap();
+
+    let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("scene_index_buffer"),
+        size: indices.len() as u64 * 4,
+        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+    index_buffer.slice(..).get_mapped_range_mut()[..indices.len() * 4]
+        .copy_from_slice(bytemuck::cast_slice(indices));
+    index_buffer.unmap();
+
+    MeshBuffers {
+        vertex_buffer: Arc::new(vertex_buffer),
+        index_buffer: Arc::new(index_buffer),
+        index_count: indices.len() as u32,
     }
 }
 
@@ -1784,6 +1823,7 @@ pub fn load_wasm_slide(
     Ok((
         LoadedSlide::World(LoadedWorldSlide {
             spec: loaded.spec,
+            scene_meshes: loaded.scene_meshes,
             runtime: loaded.runtime,
             shader_source_hint: loaded.shader_source_hint,
         }),

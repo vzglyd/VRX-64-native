@@ -118,7 +118,7 @@ pub struct LoadedScreenSlide {
 
 pub struct LoadedWorldSlide {
     pub spec: SlideSpec<WorldVertex>,
-    pub scene_meshes: Vec<slide_loader::NativeSceneMesh>,
+    pub(crate) scene_meshes: Vec<slide_loader::NativeSceneMesh>,
     pub(crate) runtime: Option<slide_loader::SlideRuntime>,
     pub(crate) shader_source_hint: Option<slide_loader::ShaderSourceHint>,
 }
@@ -535,17 +535,25 @@ impl WorldSlideRenderer {
             )?);
         }
 
-        // Create static meshes from spec
-        let mut static_meshes: Vec<MeshBuffers> = spec
+        // Create static meshes from spec, replacing authored scene placeholders
+        // with native u32 scene mesh buffers at the same draw slots.
+        let static_meshes: Vec<MeshBuffers> = spec
             .static_meshes
             .iter()
-            .map(|mesh| create_static_mesh_buffers(&ctx.device, mesh))
+            .enumerate()
+            .map(|(mesh_index, mesh)| {
+                scene_meshes.get(mesh_index).map_or_else(
+                    || create_static_mesh_buffers(&ctx.device, mesh),
+                    |scene_mesh| {
+                        create_scene_mesh_buffers(
+                            &ctx.device,
+                            &scene_mesh.vertices,
+                            &scene_mesh.indices,
+                        )
+                    },
+                )
+            })
             .collect();
-
-        // Append native scene meshes (u32 indices for large meshes)
-        for scene_mesh in &scene_meshes {
-            static_meshes.push(create_scene_mesh_buffers(&ctx.device, &scene_mesh.vertices, &scene_mesh.indices));
-        }
 
         // Create dynamic mesh buffers
         let dynamic_meshes: Vec<DynamicMeshBuffers> = spec

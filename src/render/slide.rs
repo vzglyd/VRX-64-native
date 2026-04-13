@@ -1078,8 +1078,9 @@ fn create_static_mesh_buffers<V: Pod>(device: &wgpu::Device, mesh: &StaticMesh<V
         usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: true,
     });
-    index_buffer.slice(..).get_mapped_range_mut()[..mesh.indices.len() * 4]
-        .copy_from_slice(bytemuck::cast_slice(&mesh.indices));
+    let indices_u32: Vec<u32> = mesh.indices.iter().map(|&i| i as u32).collect();
+    index_buffer.slice(..).get_mapped_range_mut()[..indices_u32.len() * 4]
+        .copy_from_slice(bytemuck::cast_slice(&indices_u32));
     index_buffer.unmap();
 
     MeshBuffers {
@@ -1110,8 +1111,9 @@ fn create_dynamic_mesh_buffers(
         usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: true,
     });
-    index_buffer.slice(..).get_mapped_range_mut()[..mesh.indices.len() * 4]
-        .copy_from_slice(bytemuck::cast_slice(&mesh.indices));
+    let indices_u32: Vec<u32> = mesh.indices.iter().map(|&i| i as u32).collect();
+    index_buffer.slice(..).get_mapped_range_mut()[..indices_u32.len() * 4]
+        .copy_from_slice(bytemuck::cast_slice(&indices_u32));
     index_buffer.unmap();
 
     DynamicMeshBuffers {

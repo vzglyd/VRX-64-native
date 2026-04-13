@@ -1561,7 +1561,10 @@ impl AssetLoader {
             GlbError::ReadError(_, msg)
             | GlbError::ParseError(_, msg)
             | GlbError::FormatError(msg)
-            | GlbError::Unsupported(msg) => LoadError::AssetLoad(msg),
+            | GlbError::Unsupported(msg) => LoadError::AssetLoad(format!(
+                "failed to load static mesh '{path}' ({:?}): {msg}",
+                resolved.display()
+            )),
         })?;
         let fallback = template.vertices.first();
         Ok(StaticMesh {
@@ -1620,7 +1623,10 @@ pub(crate) fn load_authored_scene_from_manifest(
             GlbError::ReadError(_, msg)
             | GlbError::ParseError(_, msg)
             | GlbError::FormatError(msg)
-            | GlbError::Unsupported(msg) => LoadError::AssetLoad(msg),
+            | GlbError::Unsupported(msg) => LoadError::AssetLoad(format!(
+                "failed to load scene '{:?}': {msg}",
+                resolved.display()
+            )),
         })
 }
 
@@ -2219,7 +2225,11 @@ fn build_host_mesh_asset_catalog(
             GlbError::ReadError(_, msg)
             | GlbError::ParseError(_, msg)
             | GlbError::FormatError(msg)
-            | GlbError::Unsupported(msg) => LoadError::AssetLoad(msg),
+            | GlbError::Unsupported(msg) => LoadError::AssetLoad(format!(
+                "failed to load mesh '{}' ({:?}): {msg}",
+                mesh.path,
+                resolved.display()
+            )),
         })?;
         let encoded = encode_mesh_asset(&imported)?;
         if encoded_by_key
@@ -2263,7 +2273,11 @@ fn build_host_scene_metadata_catalog(
                 GlbError::ReadError(_, msg)
                 | GlbError::ParseError(_, msg)
                 | GlbError::FormatError(msg)
-                | GlbError::Unsupported(msg) => LoadError::AssetLoad(msg),
+                | GlbError::Unsupported(msg) => LoadError::AssetLoad(format!(
+                    "failed to load scene '{}' ({:?}): {msg}",
+                    scene_ref.path,
+                    resolved.display()
+                )),
             })?;
         let runtime_key = imported.id.clone();
         let encoded = encode_scene_metadata(&imported)?;
